@@ -10,6 +10,7 @@ import {
   Tooltip as ReTooltip,
   ResponsiveContainer,
   ReferenceLine,
+  LabelList,
 } from 'recharts';
 import type { EvalReport } from './training/trainingUtils';
 import { EvalScoreBadge } from '../components/shared/EvalScoreBadge';
@@ -39,10 +40,13 @@ import {
   isSystemModel,
   modelDisplayName,
   modelFeatureList,
+  orientMetric,
   resolveMetricNumber,
+  resolveScoreDirection,
   resolveSplitMetrics,
 } from './modelRegistryUtils';
 import { ensembleMemberIds, isEnsembleModel } from './fusionUtils';
+import { SignalEvalPanel } from './SignalEvalPanel';
 import { TrainingRunDetailTabs } from './training/TrainingRunDetailTabs';
 const { Text } = Typography;
 
@@ -705,8 +709,11 @@ const ModelEvalCharts: React.FC<{
     .flatMap((d) => [d.IC, d.RankIC])
     .filter((v) => Number.isFinite(v));
   const dataMax = icValues.length ? Math.max(...icValues) : 0;
-  const hasNegativeIc = icValues.some((v) => v < 0);
-  const lower = hasNegativeIc ? -0.05 : 0;
+  const dataMin = icValues.length ? Math.min(...icValues) : 0;
+  const hasNegativeIc = dataMin < 0;
+  // 上限固定 0.25（跨模型可比），负值下限按数据向下取整到 0.05 的整数倍，
+  // 避免 IC 为负的模型柱体被裁掉；超过 0.25 的正值仍自动扩展。
+  const lower = hasNegativeIc ? Math.floor(dataMin / 0.05) * 0.05 : 0;
   const upper = Math.max(0.25, Math.ceil(dataMax / 0.05) * 0.05);
   const icDomain: [number, number] = [lower, upper];
   const icTicks: number[] = [];
@@ -727,7 +734,7 @@ const ModelEvalCharts: React.FC<{
                 <div>
                   <div className="text-[11px] font-black tracking-wider text-slate-600">IC 评估</div>
                   <div className="mt-0.5 text-[9px] text-slate-400">
-                    训练集 / 验证集 / 测试集 · 纵轴 0–0.25（超出自动扩展）· 虚线 0.05 / 0.10 参考
+                    训练集 / 验证集 / 测试集 · 纵轴上限固定 0.25（负值/超限自动扩展）· 虚线 0.05 / 0.10 参考
                   </div>
                 </div>
                 <div className="flex items-center gap-3 pb-0.5 text-[10px] font-bold text-slate-500">
@@ -735,8 +742,8 @@ const ModelEvalCharts: React.FC<{
                   <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-[3px] bg-[#38bdf8]" />RankIC</span>
                 </div>
               </div>
-              <ResponsiveContainer width="100%" height={260}>
-                <ReBarChart data={icData} barCategoryGap="22%" barGap={6} margin={{ top: 8, right: 10, left: -6, bottom: 0 }}>
+              <ResponsiveContainer width="100%" height={280}>
+                <ReBarChart data={icData} barCategoryGap="22%" barGap={6} margin={{ top: 18, right: 10, left: -6, bottom: 0 }}>
                   <CartesianGrid vertical={false} strokeDasharray="3 3" stroke="#eef2f7" />
                   <XAxis
                     dataKey="name"
@@ -759,8 +766,22 @@ const ModelEvalCharts: React.FC<{
                   />
                   <ReferenceLine y={0.05} stroke="#f59e0b" strokeDasharray="5 3" />
                   <ReferenceLine y={0.10} stroke="#10b981" strokeDasharray="5 3" />
-                  <Bar dataKey="IC" fill="#6366f1" radius={[6, 6, 0, 0]} />
-                  <Bar dataKey="RankIC" fill="#38bdf8" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="IC" fill="#6366f1" radius={[6, 6, 0, 0]}>
+                    <LabelList
+                      dataKey="IC"
+                      position="top"
+                      formatter={(value: number) => Number(value).toFixed(3)}
+                      style={{ fontSize: 8, fill: '#6366f1', fontWeight: 700 }}
+                    />
+                  </Bar>
+                  <Bar dataKey="RankIC" fill="#38bdf8" radius={[6, 6, 0, 0]}>
+                    <LabelList
+                      dataKey="RankIC"
+                      position="top"
+                      formatter={(value: number) => Number(value).toFixed(3)}
+                      style={{ fontSize: 8, fill: '#0284c7', fontWeight: 700 }}
+                    />
+                  </Bar>
                 </ReBarChart>
               </ResponsiveContainer>
             </div>
@@ -1286,6 +1307,25 @@ export const ModelDetailPanel: React.FC<{
       });
     return () => { cancelled = true; };
   }, [sourceRunId]);
+  // 反向模型：训练产物里的 IC 是翻转前原值；实际推理分已取反，展示统一翻正。
+  const scoreDirection = useMemo(() => resolveScoreDirection(meta), [meta]);
+  const orientedRunMetrics = useMemo<RunEvalPayload['metrics']>(() => {
+    const oriented = runEval?.metrics;
+    if (!oriented) return oriented ?? null;
+    const orientSegment = (segment: { ic?: number; rank_ic?: number } | undefined) => {
+      if (!segment) return segment;
+      return {
+        ...segment,
+        ic: segment.ic === undefined ? undefined : orientMetric(segment.ic, scoreDirection) ?? undefined,
+        rank_ic: segment.rank_ic === undefined ? undefined : orientMetric(segment.rank_ic, scoreDirection) ?? undefined,
+      };
+    };
+    return {
+      train: orientSegment(oriented.train),
+      val: orientSegment(oriented.val),
+      test: orientSegment(oriented.test),
+    };
+  }, [runEval, scoreDirection]);
   if (isEnsembleModel(model)) {
     return <EnsembleDetailPanel model={model} />;
   }
@@ -1319,8 +1359,14 @@ export const ModelDetailPanel: React.FC<{
     ? meta.metrics as Record<string, any>
     : null;
   const hasSplitIC = splitMetrics.length > 0;
-  const ic = metrics.ic ?? metrics.IC ?? metrics.mean_ic ?? resolveMetricNumber(metadataMetrics, ['test_ic', 'val_ic', 'train_ic']) ?? null;
-  const icir = metrics.icir ?? metrics.ICIR ?? metrics.IC_IR ?? resolveMetricNumber(metadataMetrics, ['test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir', 'train_rank_icir', 'train_icir']) ?? null;
+  const ic = orientMetric(
+    metrics.ic ?? metrics.IC ?? metrics.mean_ic ?? resolveMetricNumber(metadataMetrics, ['test_ic', 'val_ic', 'train_ic']) ?? null,
+    scoreDirection,
+  );
+  const icir = orientMetric(
+    metrics.icir ?? metrics.ICIR ?? metrics.IC_IR ?? resolveMetricNumber(metadataMetrics, ['test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir', 'train_rank_icir', 'train_icir']) ?? null,
+    scoreDirection,
+  );
   const hasIC = [ic, icir].some(v => v !== null);
 
   const horizonDays = meta.target_horizon_days ?? meta.horizon_days;
@@ -1368,7 +1414,7 @@ export const ModelDetailPanel: React.FC<{
     <div className="space-y-4 pt-1">
       {/* 第一行：三段指标卡（全宽一行，置于 IC 评估上方） */}
       <SplitMetricCards
-        metrics={runEval?.metrics ?? null}
+        metrics={orientedRunMetrics ?? null}
         windows={splitWindows}
         fallbackRows={metricRows.map((item) => ({
           key: item.key,
@@ -1385,11 +1431,23 @@ export const ModelDetailPanel: React.FC<{
           <DetailSection
             title="性能指标"
             className="lg:h-[400px] flex flex-col"
-            meta={<span className="text-[9px] font-black tracking-wider text-slate-400">IC · RANK IC · IR</span>}
+            meta={(
+              <span className="flex items-center gap-1.5 text-[9px] font-black tracking-wider text-slate-400">
+                {scoreDirection === 'reversed' && (
+                  <span
+                    className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-black text-amber-600"
+                    title="训练验证 IC 为负，推理分数已翻转；此处显示翻转后的有效 IC"
+                  >
+                    反向 · 已翻正
+                  </span>
+                )}
+                IC · RANK IC · IR
+              </span>
+            )}
           >
             <div className="flex flex-1 flex-col justify-center">
               <ModelEvalCharts
-                metrics={runEval?.metrics ?? null}
+                metrics={orientedRunMetrics ?? null}
                 loading={runEvalLoading}
                 fallbackRows={metricRows.map((item) => ({
                   key: item.key,
@@ -1473,6 +1531,9 @@ export const ModelDetailPanel: React.FC<{
           </DetailSection>
         </div>
       </div>
+
+      {/* 测试集实盘力：滚动 3 个月截面排序 + TopN 长多体检（随推理/行情自动更新） */}
+      <SignalEvalPanel modelId={model.model_id} />
 
       {modelParams && importantParams.length > 0 && (
         <DetailSection

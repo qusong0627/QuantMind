@@ -12,6 +12,7 @@ import dayjs, { Dayjs } from 'dayjs';
 import { clsx } from 'clsx';
 import { PAGE_LAYOUT } from '../config/pageLayout';
 import { modelTrainingService } from '../services/modelTrainingService';
+import { confirmAdmissionOverride, getAdmissionGate } from '../utils/modelAdmission';
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
@@ -1223,12 +1224,25 @@ export const ModelTrainingPage: React.FC = () => {
   const handleSetDefaultModel = async () => {
     const id = result?.modelRegistration?.modelId || result?.modelId;
     if (!id) return;
+    const apply = async (force: boolean) => {
+      await modelTrainingService.setDefaultModel(id, force);
+      message.success('成功重置默认模型');
+    };
     try {
       setSettingDefaultModel(true);
-      await modelTrainingService.setDefaultModel(id);
-      message.success('成功重置默认模型');
-    } catch (e: any) { message.error(e.message); }
-    finally { setSettingDefaultModel(false); }
+      await apply(false);
+    } catch (err: unknown) {
+      const gate = getAdmissionGate(err);
+      if (gate && (await confirmAdmissionOverride(gate, '设为默认'))) {
+        try {
+          await apply(true);
+        } catch (retryErr: unknown) {
+          message.error(retryErr instanceof Error ? retryErr.message : '设置失败');
+        }
+      } else if (!gate) {
+        message.error(err instanceof Error ? err.message : '设置失败');
+      }
+    } finally { setSettingDefaultModel(false); }
   };
 
   const stepActionLabel = currentStep < 3 ? '下一步' : currentStep === 3 ? '开始训练' : '重新配置';

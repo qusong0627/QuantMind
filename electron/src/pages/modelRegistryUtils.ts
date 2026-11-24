@@ -153,6 +153,21 @@ const splitAliases = (key: ModelSplitKey): string[] => (key === 'valid' ? ['vali
  * 优先 performance_metrics.{split}，再回退 metadata.metrics 的 {split}_ic / {split}_rank_icir
  * 平铺字段；取不到一律 null（展示层写「—」，绝不伪造 0）。
  */
+export function resolveScoreDirection(meta: Record<string, any>): 'normal' | 'reversed' {
+  const metrics = meta.metrics && typeof meta.metrics === 'object' ? meta.metrics : {};
+  const raw = metrics.score_direction ?? meta.score_direction;
+  return String(raw || '').toLowerCase() === 'reversed' ? 'reversed' : 'normal';
+}
+
+/** 训练指标是翻转前的原始方向；reversed 模型的实际推理分已取反，展示时统一翻正。 */
+export function orientMetric(
+  value: number | null,
+  direction: 'normal' | 'reversed',
+): number | null {
+  if (value === null || !Number.isFinite(value) || direction !== 'reversed') return value;
+  return -value;
+}
+
 export function resolveSplitMetrics(meta: Record<string, any>): Record<ModelSplitKey, SplitMetricNumbers> {
   const performance = meta.performance_metrics && typeof meta.performance_metrics === 'object'
     ? meta.performance_metrics as Record<string, any>
@@ -169,6 +184,7 @@ export function resolveSplitMetrics(meta: Record<string, any>): Record<ModelSpli
     return null;
   };
   const result = {} as Record<ModelSplitKey, SplitMetricNumbers>;
+  const direction = resolveScoreDirection(meta);
   for (const key of ['train', 'valid', 'test'] as const) {
     const source = sourceOf(key);
     const aliases = splitAliases(key);
@@ -178,7 +194,11 @@ export function resolveSplitMetrics(meta: Record<string, any>): Record<ModelSpli
       ?? resolveMetricNumber(metadataMetrics, aliases.flatMap((alias) => [`${alias}_rank_ic`, `rank_ic_${alias}`]));
     const icir = resolveMetricNumber(source, SPLIT_ICIR_KEYS)
       ?? resolveMetricNumber(metadataMetrics, aliases.flatMap((alias) => [`${alias}_icir`, `${alias}_rank_icir`]));
-    result[key] = { ic, rankIc, icir };
+    result[key] = {
+      ic: orientMetric(ic, direction),
+      rankIc: orientMetric(rankIc, direction),
+      icir: orientMetric(icir, direction),
+    };
   }
   return result;
 }
@@ -226,9 +246,39 @@ export function extractModelTypeShort(m: UserModelRecord): string {
   return '';
 }
 
+/** 无显式展示名时的可读兜底：市场 · 算法 · T+N · 特征数 · 短 ID。
+ *
+ * 2026-11-24 美股一批模型的 metadata 只有 job_name='unnamed'，没有 display_name，
+ * 列表里只剩一长串 model_id（或空白）——用元数据拼一个稳定、可区分的名字。
+ */
+export function buildFallbackModelName(m: UserModelRecord): string {
+  const meta = getMeta(m) as Record<string, any>;
+  const context = meta.context && typeof meta.context === 'object' ? meta.context : {};
+  const market = String(meta.market || context.market || '').toUpperCase();
+  const marketLabels: Record<string, string> = {
+    CN: 'A股', HK: '港股', US: '美股', CRYPTO: '加密', FUTURES: '期货', CUSTOM: '自定义',
+  };
+  const algo = extractModelTypeShort(m);
+  const rawType = String(meta.model_type || meta.primary_model_type || '').trim();
+  const typeLabel = algo || (rawType ? rawType.toUpperCase() : '模型');
+  const horizon = Number(meta.target_horizon_days ?? meta.horizon_days ?? 0);
+  const featureCount = Number(
+    meta.feature_count ?? (Array.isArray(meta.features) ? meta.features.length : 0),
+  );
+  const suffix = String(m.model_id || '').split('_').filter(Boolean).slice(-1)[0] || '';
+  const parts = [marketLabels[market] || market, typeLabel];
+  if (Number.isFinite(horizon) && horizon > 0) parts.push(`T+${horizon}`);
+  if (Number.isFinite(featureCount) && featureCount > 0) parts.push(`${featureCount}特征`);
+  if (suffix) parts.push(suffix.slice(0, 6));
+  return parts.filter(Boolean).join(' · ') || m.model_id || '—';
+}
+
 export function modelDisplayName(m: UserModelRecord): string {
   const meta = getMeta(m);
-  const base = modelIdToDisplayName(m.model_id, meta.display_name || m.model_id);
+  const explicit = String(meta.display_name || meta.model_name || '').trim();
+  const isPlaceholder = !explicit || explicit.toLowerCase() === 'unnamed';
+  if (isPlaceholder) return buildFallbackModelName(m);
+  const base = modelIdToDisplayName(m.model_id, explicit);
   const algo = extractModelTypeShort(m);
   if (algo && !base.toLowerCase().startsWith(algo.toLowerCase())) {
     return `${algo} - ${base}`;

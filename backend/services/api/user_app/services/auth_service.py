@@ -29,6 +29,7 @@ from backend.services.api.user_app.services.enhanced_audit_service import (
     EnhancedAuditService,
 )
 from backend.services.api.user_app.services.rbac_service import RBACService
+from backend.shared.auth import get_jwt_secret
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
@@ -233,7 +234,7 @@ class AuthService:
                 select(User).where(
                     User.user_id == user_id,
                     User.tenant_id == tenant_id,
-                    User.is_deleted == False,
+                    User.is_deleted.is_(False),
                 )
             )
             user = result.scalar_one_or_none()
@@ -420,7 +421,7 @@ class AuthService:
             "type": "access",
         }
 
-        token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        token = jwt.encode(payload, get_jwt_secret(), algorithm=settings.ALGORITHM)
         return token, jti
 
     def _create_refresh_token(self, user_id: str, tenant_id: str) -> str:
@@ -437,7 +438,7 @@ class AuthService:
             "type": "refresh",
         }
 
-        return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        return jwt.encode(payload, get_jwt_secret(), algorithm=settings.ALGORITHM)
 
     def create_access_token(self, data: dict) -> str:
         """对外暴露的访问Token创建（兼容测试/调用）"""
@@ -453,7 +454,7 @@ class AuthService:
             + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
             "type": "access",
         }
-        return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+        return jwt.encode(payload, get_jwt_secret(), algorithm=settings.ALGORITHM)
 
     def get_password_hash(self, password: str) -> str:
         """对外暴露的密码哈希（兼容测试/调用）"""
@@ -509,6 +510,7 @@ class AuthService:
         # 为新用户自动注册系统模型（若配置了 PRIMARY_MODEL_ID）
         try:
             from backend.shared.model_registry import model_registry_service
+
             await model_registry_service._ensure_system_default_record(
                 tenant_id=user_data.tenant_id, user_id=user_id
             )
@@ -557,7 +559,7 @@ class AuthService:
                         | (User.email == credentials.username)
                     )
                     .where(User.tenant_id == tenant_id)
-                    .where(User.is_deleted == False)
+                    .where(User.is_deleted.is_(False))
                 )
                 user = result.scalar_one_or_none()
 
@@ -631,7 +633,7 @@ class AuthService:
                 select(User)
                 .where(User.username == credentials.username)
                 .where(User.tenant_id == credentials.tenant_id)
-                .where(User.is_deleted == False)
+                .where(User.is_deleted.is_(False))
             )
             user = result.scalar_one_or_none()
 
@@ -660,7 +662,7 @@ class AuthService:
         try:
             payload = jwt.decode(
                 token,
-                settings.SECRET_KEY,
+                get_jwt_secret(),
                 algorithms=[settings.ALGORITHM],
                 options={"verify_exp": True},
             )
@@ -686,12 +688,12 @@ class AuthService:
         try:
             payload = jwt.decode(
                 refresh_token,
-                settings.SECRET_KEY,
+                get_jwt_secret(),
                 algorithms=[settings.ALGORITHM],
                 options={"verify_exp": True},
             )
         except JWTError:
-            raise ValueError("刷新令牌无效或已过期")
+            raise ValueError("刷新令牌无效或已过期") from None
 
         if payload.get("type") != "refresh":
             raise ValueError("刷新令牌类型错误")
@@ -761,7 +763,7 @@ class AuthService:
         try:
             payload = jwt.decode(
                 token,
-                settings.SECRET_KEY,
+                get_jwt_secret(),
                 algorithms=[settings.ALGORITHM],
                 options={"verify_exp": True},
             )

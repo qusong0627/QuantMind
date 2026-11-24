@@ -71,6 +71,7 @@ QuantBot（dsh 容器 / DeepSeek Harness）**无需安装**：docker-compose 把
 | [rd-agent-factor-mining](rd-agent-factor-mining/) | RD-Agent 因子挖掘端到端流水线：preflight → 演化 → 回测评估 → IC/Sharpe 排序 → 入库，支持五市场 | 挖因子、因子挖掘、RD-Agent、一键挖因子 |
 | [model-train-infer-backtest-report](model-train-infer-backtest-report/) | 训练-推理-组合回测-专业报告全流程：13 种模型类型、批量推理全年、自定义组合回测（阈值+大盘MA+止损）、研报 MD+PDF | 训练模型、推理全年、T+3、止损、出报告 |
 | [model-inference-backfill](model-inference-backfill/) | 推理入口导航与补全：前端/API/Celery/内部 runner 全链路地图、coverage 缺口口径、多模型多周期批量补 pred.parquet（含并发/兜底/双写硬约束与验证 SQL） | 推理入口、补推理、推理缺口、推理覆盖、推理到几号、补齐 pred |
+| [model-signal-eval](model-signal-eval/) | 模型标准化评估：测试集截面排序（RankIC/中性化/FM/分位）+ TopN 长多 + FF5 双口径归因；滚动 3 个月动态体检、准入等级与 409 闸门 | 模型评估、模型体检、排序能力、模型能不能上、模型准入、滚动3个月 |
 | [factor-train-pipeline](factor-train-pipeline/) | 因子训练链路：因子研究筛选保留集（可按库剔除，如去 L2）→ 合并自定义市场数据集 → 发布训练目录 → 生产级 LightGBM 训练全流程与实战坑清单 | 因子训练、筛选因子拿去训练、去L2训练、合并因子训练、自定义市场训练 |
 | [factor-materialize-catalog](factor-materialize-catalog/) | 挖掘后半程：物化（值级查重，相关系数≥0.9 拒收）→ 字段发现/草稿播种 → 发布（=替换）→ 跨库训练载荷四道门；含只读体检脚本（候选四桶/草稿差集/从未尝试清单） | 物化、因子没加进来、值级查重、发布因子目录、跨库训练、rd_mined |
 

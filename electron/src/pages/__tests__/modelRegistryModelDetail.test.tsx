@@ -11,6 +11,11 @@ vi.mock('../../components/shared/EvalScoreBadge', () => ({
   EvalScoreBadge: () => null,
 }));
 
+// 测试集实盘力面板独立测；这里避免它发起真实网络请求。
+vi.mock('../SignalEvalPanel', () => ({
+  SignalEvalPanel: () => null,
+}));
+
 // 跨模型共用口径依赖最新评分（A 级、A/B 兜底）；测试里给显式评级，不碰网络。
 vi.mock('../../features/eval-center/services/evalCenterService', () => ({
   listScores: vi.fn(),

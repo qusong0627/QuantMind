@@ -333,6 +333,8 @@ def _load_production_models() -> list[dict[str, Any]]:
 
 class SetDefaultModelRequest(BaseModel):
     model_id: str
+    # 标准化评估未通过/缺失时，显式确认风险后才放行（409 → 前端二次确认）
+    force: bool = False
 
 
 class RenameModelRequest(BaseModel):
@@ -341,6 +343,7 @@ class RenameModelRequest(BaseModel):
 
 class SetStrategyBindingRequest(BaseModel):
     model_id: str
+    force: bool = False
 
 
 class InferenceRunRequest(BaseModel):
@@ -1513,6 +1516,14 @@ async def set_default_model(
 ):
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    existing = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=payload.model_id
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Model not found")
+    admission = await _require_signal_admission(
+        payload.model_id, existing, force=payload.force, action="set_default"
+    )
     try:
         model = await model_registry_service.set_default_model(
             tenant_id=tenant_id,
@@ -1521,6 +1532,8 @@ async def set_default_model(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if admission is not None and isinstance(model, dict):
+        return {**model, "admission": admission}
     return model
 
 
@@ -1549,6 +1562,14 @@ async def set_strategy_binding(
 ):
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    existing = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=payload.model_id
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Model not found")
+    admission = await _require_signal_admission(
+        payload.model_id, existing, force=payload.force, action="bind_strategy"
+    )
     try:
         binding = await model_registry_service.set_strategy_binding(
             tenant_id=tenant_id,
@@ -1558,6 +1579,8 @@ async def set_strategy_binding(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if admission is not None and isinstance(binding, dict):
+        return {**binding, "admission": admission}
     return binding
 
 
@@ -2654,6 +2677,106 @@ async def refresh_model_scorecards(
         raise HTTPException(status_code=503, detail=f"重算任务派发失败：{exc}") from exc
 
 
+def _signal_eval_params(model: dict[str, Any]) -> tuple[str, int]:
+    """模型记录 → (market, horizon)；老模型缺字段时按 A股/T+5 兜底。"""
+    meta = model.get("metadata_json")
+    if not isinstance(meta, dict):
+        meta = {}
+    context = meta.get("context") if isinstance(meta.get("context"), dict) else {}
+    market = str(meta.get("market") or context.get("market") or "CN").upper()
+    try:
+        horizon = int(meta.get("target_horizon_days") or 5)
+    except (TypeError, ValueError):
+        horizon = 5
+    return market, horizon
+
+
+async def _require_signal_admission(
+    model_id: str, model: dict[str, Any], *, force: bool, action: str
+) -> dict | None:
+    """标准化评估闸门：red/unknown 必须显式 force；yellow 放行但把 reasons 带回前端。"""
+    from backend.services.api import model_signal_eval_service
+
+    market, horizon = _signal_eval_params(model)
+    if market != "CN":
+        return None
+    admission = await asyncio.to_thread(
+        model_signal_eval_service.admission_status,
+        model_id,
+        str(model.get("storage_path") or ""),
+        market=market,
+        horizon=horizon,
+    )
+    if admission.get("grade") in ("red", "unknown") and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "model_signal_eval_gate",
+                "action": action,
+                "grade": admission.get("grade"),
+                "reasons": admission.get("reasons") or [],
+                "window_end": admission.get("window_end"),
+                "message": "该模型未通过标准化评估，需显式确认风险后才能上线",
+            },
+        )
+    return admission
+
+
+@router.get("/{model_id}/signal-eval", summary="测试集实盘力（滚动3个月）")
+async def get_model_signal_eval(
+    model_id: str,
+    window_days: int = 63,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """只统计推理过的 test 切分；窗口随推理与行情自动前移。"""
+    from backend.services.api import model_signal_eval_service
+
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    model = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+    )
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    market, horizon = _signal_eval_params(model)
+    days = max(20, min(int(window_days), 120))
+    return await asyncio.to_thread(
+        model_signal_eval_service.get_state,
+        model_id,
+        str(model.get("storage_path") or ""),
+        market=market,
+        horizon=horizon,
+        window_days=days,
+    )
+
+
+@router.post("/{model_id}/signal-eval/refresh", summary="刷新测试集实盘力（后台）")
+async def refresh_model_signal_eval(
+    model_id: str,
+    window_days: int = 63,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    from backend.services.api import model_signal_eval_service
+
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    model = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+    )
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    market, horizon = _signal_eval_params(model)
+    days = max(20, min(int(window_days), 120))
+    return await asyncio.to_thread(
+        model_signal_eval_service.start_refresh,
+        model_id,
+        str(model.get("storage_path") or ""),
+        market=market,
+        horizon=horizon,
+        window_days=days,
+    )
+
+
 @router.get("/{model_id}", summary="获取单个用户模型（用户态）")
 async def get_user_model(
     model_id: str,
@@ -2781,17 +2904,31 @@ async def restore_user_model(
 @router.post("/{model_id}/activate", summary="手动激活候选模型（用户态）")
 async def activate_user_model(
     model_id: str,
+    force: bool = False,
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
-    """手动激活 candidate 模型 → ready（软门禁触发的模型走此入口）。"""
+    """手动激活 candidate 模型 → ready（软门禁触发的模型走此入口）。
+
+    激活前校验标准化评估：red/unknown 需 ``force=true`` 显式确认风险。
+    """
     tenant_id = str(current_user.get("tenant_id") or "default")
     user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    existing = await model_registry_service.get_model(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Model not found")
+    admission = await _require_signal_admission(
+        model_id, existing, force=force, action="activate"
+    )
     try:
         model = await model_registry_service.activate_model(
             tenant_id=tenant_id, user_id=user_id, model_id=model_id
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if admission is not None and isinstance(model, dict):
+        return {**model, "admission": admission}
     return model
 
 

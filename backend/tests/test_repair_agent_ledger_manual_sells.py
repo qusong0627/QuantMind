@@ -372,6 +372,31 @@ def test_manual_flow_handles_sell_then_buy_same_day():
 
 
 @pytest.mark.unit
+def test_manual_flow_merges_same_order_multi_leg_sell():
+    """2026-11-24 601825 实况：一笔卖出 300 跨多段持仓时，fill_key 必须只出现一次。
+
+    期初补 200 买入后，卖 300 会被 FIFO 切成 100+200 两段（同一 agent/订单）；
+    若不合并，apply_fill 在第二段判重复、整批回滚（实测每分钟失败一次）。
+    """
+    rows = [_row(MANUAL_AGENT, "601825.SH", 100, 9.6, _dt(18, 1, 30, month=11))]
+    plan = plan_manual_flows(
+        rows,
+        [],
+        [_sell("s-big", "601825.SH", 300, 9.5, _dt(24, 1, 20, month=11))],
+        {"601825.SH": 0},
+    )
+
+    assert not plan.skipped, plan.skipped
+    buys = [f for f in plan.fills if f.side == "buy"]
+    sells = [f for f in plan.fills if f.side == "sell"]
+    assert [(f.agent, f.volume) for f in buys] == [(MANUAL_AGENT, 200)]
+    assert len(sells) == 1, sells
+    assert sells[0].volume == 300
+    keys = [f.fill_key for f in plan.fills]
+    assert len(keys) == len(set(keys))
+
+
+@pytest.mark.unit
 def test_manual_flow_adjusts_ledger_excess_at_window_start():
     """期初账本比真实多 100 ⇒ 先记一笔卖出调整，再处理窗口内成交。"""
     rows = [_row("agent-a", "600760.SH", 300, 46.97, _dt(19, 3, 0))]

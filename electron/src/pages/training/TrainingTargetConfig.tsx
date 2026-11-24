@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, Divider, Select, Button, InputNumber, Alert, DatePicker, Tag, Typography, Tooltip, Switch } from 'antd';
-import { Target, ArrowRightLeft, Info, CalendarRange } from 'lucide-react';
+import { Target, ArrowRightLeft, Info, CalendarRange, HelpCircle } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Dayjs } from 'dayjs';
 import dayjs from 'dayjs';
@@ -29,6 +29,7 @@ import {
   targetRefKey,
 } from './trainingTargetCapabilities';
 import { AdminModelFeatureDataCoverage } from '../../features/admin/types';
+import { TrainingTargetHelpModal } from './TrainingTargetHelpModal';
 
 const { RangePicker } = DatePicker;
 
@@ -99,6 +100,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   const selectedTarget = findTargetByKey(availableTargets, targetKey);
   const locks = targetFormLocks(target.targetSpec);
   const isRegistryTarget = Boolean(target.targetRef);
+  const [showTransformHelp, setShowTransformHelp] = React.useState(false);
   const hideDropExtreme =
     target.mode === 'classification' ||
     locks.hideDropExtreme ||
@@ -302,7 +304,21 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
                   </div>
                 ) : (
                   <>
-                    <div className="mb-1 text-xs font-semibold text-slate-700">标签截面变换</div>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1 text-xs font-semibold text-slate-700">
+                        标签截面变换
+                        <HelpCircle size={12} className="text-indigo-500" />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowTransformHelp(true)}
+                        className="inline-flex items-center gap-1 rounded-md border border-indigo-100 bg-indigo-50/50 px-1.5 py-0.5 text-[9px] font-bold text-indigo-600 transition-colors hover:bg-indigo-100"
+                        title="查看六种变换的定义、适用边界与按模型建议"
+                      >
+                        <HelpCircle size={10} />
+                        用法建议
+                      </button>
+                    </div>
                     <Select
                       value={target.labelTransform}
                       onChange={(value) => onTargetChange({ ...target, labelTransform: value as TrainingTarget['labelTransform'] })}
@@ -518,6 +534,11 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
         </div>
 
       </Card>
+
+      <TrainingTargetHelpModal
+        open={showTransformHelp}
+        onClose={() => setShowTransformHelp(false)}
+      />
     </div>
   );
 };

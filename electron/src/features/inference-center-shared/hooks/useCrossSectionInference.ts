@@ -19,6 +19,7 @@ import {
   type UserModelRecord,
 } from '../../../services/modelTrainingService';
 import { getMeta, systemModelToUserModel } from '../../../pages/modelRegistryUtils';
+import { confirmAdmissionOverride, getAdmissionGate } from '../../../utils/modelAdmission';
 
 /** 单日推理股票池选择（仅 A 股使用）：null = 全市场 */
 export interface InferencePoolSelection {
@@ -356,12 +357,24 @@ export function useCrossSectionInference(
     const canonicalId = selectedModel.model_id.startsWith('sys-')
       ? selectedModel.model_id.slice(4)
       : selectedModel.model_id;
-    try {
-      await modelTrainingService.setDefaultModel(canonicalId);
+    const apply = async (force: boolean) => {
+      await modelTrainingService.setDefaultModel(canonicalId, force);
       message.success(`已设为默认模型：${selectedModel.model_id}`);
       await loadRegisteredModels();
-    } catch (err: any) {
-      message.error(`设置失败: ${err?.message ?? '未知'}`);
+    };
+    try {
+      await apply(false);
+    } catch (err: unknown) {
+      const gate = getAdmissionGate(err);
+      if (gate && (await confirmAdmissionOverride(gate, '设为默认'))) {
+        try {
+          await apply(true);
+        } catch (retryErr: unknown) {
+          message.error(`设置失败: ${retryErr instanceof Error ? retryErr.message : '未知'}`);
+        }
+      } else if (!gate) {
+        message.error(`设置失败: ${err instanceof Error ? err.message : '未知'}`);
+      }
     }
   }, [selectedModel, loadRegisteredModels]);
 

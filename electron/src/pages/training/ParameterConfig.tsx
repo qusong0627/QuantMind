@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, Divider, Input, Button, Row, Col, InputNumber, Select, Alert, Typography, Tag, Checkbox, Switch, Tooltip } from 'antd';
-import { Settings2, MonitorPlay, TreePine, Cpu, Ruler, AlertTriangle } from 'lucide-react';
+import { Settings2, MonitorPlay, TreePine, Cpu, Ruler, AlertTriangle, HelpCircle } from 'lucide-react';
 import {
   TrainingParams,
   TrainingContext,
@@ -12,6 +12,7 @@ import {
   MODEL_TYPE_OPTIONS,
   MODEL_DL_DEFAULTS,
 } from './trainingUtils';
+import { ParameterHelpPopover } from './ParameterHelpPopover';
 import type { AppMarket } from '../../store/slices/uiSlice';
 
 const MARKET_BENCHMARKS: Record<string, { label: string; value: string }[]> = {
@@ -58,7 +59,7 @@ interface ParameterConfigProps {
   onWfaChange?: (wfa: WfaConfig) => void;
 }
 
-const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
+const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode; extra?: React.ReactNode }> = ({ title, desc, icon, extra }) => (
   <div className="flex items-start justify-between gap-4">
     <div>
       <div className="flex items-center gap-2">
@@ -71,6 +72,7 @@ const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactN
         {desc}
       </Typography.Paragraph>
     </div>
+    {extra ? <div className="shrink-0 pt-1">{extra}</div> : null}
   </div>
 );
 
@@ -143,6 +145,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
           title="第三步：参数配置"
           desc="把模型超参与训练上下文拆开，避免配置语义混在一起。"
           icon={<Settings2 size={18} className="text-indigo-500" />}
+          extra={<ParameterHelpPopover />}
         />
         <Divider className="my-4" />
         <div className="space-y-4">
@@ -376,7 +379,18 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
             </div>
           </Card>
 
-          <Card className="rounded-2xl border-slate-200" size="small" title="训练超参">
+          <Card
+            className="rounded-2xl border-slate-200"
+            size="small"
+            title={(
+              <ParameterHelpPopover>
+                <span className="inline-flex cursor-help items-center gap-1.5 border-b border-dashed border-slate-300 text-slate-700">
+                  训练超参
+                  <HelpCircle size={13} className="text-indigo-500" />
+                </span>
+              </ParameterHelpPopover>
+            )}
+          >
             <div className="space-y-4">
               {/* Objective & Metric - 共享 */}
               <Row gutter={[12, 12]}>

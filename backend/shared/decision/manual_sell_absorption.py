@@ -58,6 +58,7 @@ def model_agent_names(agents: Any) -> list[str]:
     }
     return sorted(out)
 
+
 #: 卖出理由（只记录，进回合台账；与真单的 NULL 区分，行为归因可单独过滤）。
 EXIT_REASON = "manual_absorb"
 
@@ -219,7 +220,9 @@ def plan_absorption(
         gap = round(ledger_total - real, 4)
         if gap <= EPS:
             skipped.append(
-                AbsorbSkip(code, REASON_NO_GAP, f"账本 {ledger_total:g} / 真实 {real:g}")
+                AbsorbSkip(
+                    code, REASON_NO_GAP, f"账本 {ledger_total:g} / 真实 {real:g}"
+                )
             )
             continue
 
@@ -338,6 +341,42 @@ def plan_absorption(
     )
 
 
+def _merge_same_key_fills(fills: list[AbsorbFill]) -> list[AbsorbFill]:
+    """同一 fill_key 的多段合并成一笔（按量加权价）。
+
+    一笔未归属卖出若跨多个持仓批次（同一 agent 的多段，或期初调整刚补的持仓），
+    FIFO 会生成多条 ``manual-absorb:{order_id}:{agent}``。fill_key 是当日唯一幂等键，
+    不合并会让 apply_fill 在第二条判重复、整批回滚——2026-11-24 601825 即此形态。
+    """
+    merged: dict[str, AbsorbFill] = {}
+    order: list[str] = []
+    for fill in fills:
+        prev = merged.get(fill.fill_key)
+        if prev is None:
+            merged[fill.fill_key] = fill
+            order.append(fill.fill_key)
+            continue
+        total = prev.volume + fill.volume
+        if total <= 0:
+            continue
+        merged[fill.fill_key] = AbsorbFill(
+            agent=prev.agent,
+            code=prev.code,
+            volume=round(total, 6),
+            price=(prev.price * prev.volume + fill.price * fill.volume) / total,
+            order_id=prev.order_id,
+            fill_key=prev.fill_key,
+            trade_date=prev.trade_date,
+            filled_at=min(prev.filled_at, fill.filled_at),
+            cost_price=(prev.cost_price * prev.volume + fill.cost_price * fill.volume)
+            / total,
+            realized_pnl=round(prev.realized_pnl + fill.realized_pnl, 2),
+            closes=prev.closes or fill.closes,
+            side=prev.side,
+        )
+    return [merged[key] for key in order]
+
+
 def plan_manual_flows(
     ledger_rows: Sequence[Mapping[str, Any]],
     buys: Sequence[Mapping[str, Any]],
@@ -388,7 +427,10 @@ def plan_manual_flows(
         for item in items:
             if str(item.get("agent") or "").strip():
                 continue  # 归属成交走真单落账路径
-            if absorbed_order_ids and str(item.get("order_id") or "") in absorbed_order_ids:
+            if (
+                absorbed_order_ids
+                and str(item.get("order_id") or "") in absorbed_order_ids
+            ):
                 continue  # 已入过账（幂等：同一 order 的 manual-* 流水已存在）
             code = to_suffix_code(item.get("code"))
             volume = to_float(item.get("volume"))
@@ -609,6 +651,8 @@ def plan_manual_flows(
             continue
         fills.extend(code_fills)
 
+    # 同一订单/agent 的多段卖出必须先合并：fill_key 当日唯一，逐段写会自撞幂等键
+    fills = _merge_same_key_fills(fills)
     proceeds: dict[str, float] = defaultdict(float)
     pnl: dict[str, float] = defaultdict(float)
     for fill in fills:

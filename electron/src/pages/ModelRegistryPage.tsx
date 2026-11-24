@@ -91,6 +91,7 @@ import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
 import { MarketSelector } from '../components/layout/MarketSelector';
+import { confirmAdmissionOverride, getAdmissionGate } from '../utils/modelAdmission';
 const { Text } = Typography;
 
 type ModelListTab = 'active' | 'favorites' | 'archived';
@@ -838,13 +839,25 @@ export const ModelRegistryPage: React.FC = () => {
   const handleSetDefaultById = async (modelId: string) => {
     setSettingDefault(true);
     const canonicalId = modelId.startsWith('sys-') ? modelId.slice(4) : modelId;
-    try {
-      await modelTrainingService.setDefaultModel(canonicalId);
+    const applyDefault = async (force: boolean) => {
+      await modelTrainingService.setDefaultModel(canonicalId, force);
       message.success(`已设为默认模型：${modelId}`);
       await loadModels(true);
       setSelectedId(modelId);
-    } catch (err: any) {
-      message.error(`设置失败: ${err?.message ?? '未知'}`);
+    };
+    try {
+      await applyDefault(false);
+    } catch (err: unknown) {
+      const gate = getAdmissionGate(err);
+      if (gate && (await confirmAdmissionOverride(gate, '设为默认'))) {
+        try {
+          await applyDefault(true);
+        } catch (retryErr: unknown) {
+          message.error(`设置失败: ${retryErr instanceof Error ? retryErr.message : '未知'}`);
+        }
+      } else if (!gate) {
+        message.error(`设置失败: ${err instanceof Error ? err.message : '未知'}`);
+      }
     } finally { setSettingDefault(false); }
   };
 
@@ -919,13 +932,25 @@ export const ModelRegistryPage: React.FC = () => {
       cancelText: '取消',
       onOk: async () => {
         setActivating(true);
-        try {
-          await modelTrainingService.activateUserModel(selectedModel.model_id);
+        const applyActivate = async (force: boolean) => {
+          await modelTrainingService.activateUserModel(selectedModel.model_id, force);
           message.success('已激活');
           await loadModels(true);
           setSelectedId(selectedModel.model_id);
-        } catch (err: any) {
-          message.error(`激活失败: ${err?.message ?? '未知'}`);
+        };
+        try {
+          await applyActivate(false);
+        } catch (err: unknown) {
+          const gate = getAdmissionGate(err);
+          if (gate && (await confirmAdmissionOverride(gate, '仍然激活'))) {
+            try {
+              await applyActivate(true);
+            } catch (retryErr: unknown) {
+              message.error(`激活失败: ${retryErr instanceof Error ? retryErr.message : '未知'}`);
+            }
+          } else if (!gate) {
+            message.error(`激活失败: ${err instanceof Error ? err.message : '未知'}`);
+          }
         } finally { setActivating(false); }
       },
     });

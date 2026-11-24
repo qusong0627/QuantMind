@@ -10,6 +10,7 @@ import type {
   BackfillJobList,
   BackfillPreview,
 } from './modelInferenceJobTypes';
+import type { SignalEvalState } from './modelSignalEvalTypes';
 import type { RetrainConfigPayload } from '../pages/training/retrainConfig';
 import type {
   LabelTargetSummary,
@@ -1096,8 +1097,11 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  async setDefaultModel(modelId: string): Promise<UserModelRecord> {
-    const resp = await this.client.patch<UserModelRecord>(`/models/default`, { model_id: modelId });
+  async setDefaultModel(modelId: string, force = false): Promise<UserModelRecord> {
+    const resp = await this.client.patch<UserModelRecord>(`/models/default`, {
+      model_id: modelId,
+      force,
+    });
     return resp.data;
   }
 
@@ -1141,8 +1145,12 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  async activateUserModel(modelId: string): Promise<UserModelRecord> {
-    const resp = await this.client.post<UserModelRecord>(`/models/${modelId}/activate`);
+  async activateUserModel(modelId: string, force = false): Promise<UserModelRecord> {
+    const resp = await this.client.post<UserModelRecord>(
+      `/models/${modelId}/activate`,
+      undefined,
+      { params: force ? { force: true } : undefined },
+    );
     return resp.data;
   }
 
@@ -1286,6 +1294,22 @@ class ModelTrainingService {
     return resp.data;
   }
 
+  /** 测试集实盘力（滚动 3 个月）：缓存/运行状态。 */
+  async getModelSignalEval(modelId: string): Promise<SignalEvalState> {
+    const resp = await this.client.get<SignalEvalState>(
+      `/models/${encodeURIComponent(modelId)}/signal-eval`,
+    );
+    return resp.data;
+  }
+
+  /** 触发后台重算（幂等：已有作业时返回 running）。 */
+  async refreshModelSignalEval(modelId: string): Promise<{ status: string }> {
+    const resp = await this.client.post<{ status: string }>(
+      `/models/${encodeURIComponent(modelId)}/signal-eval/refresh`,
+    );
+    return resp.data;
+  }
+
   async compareModels(modelIds: string[]): Promise<any> {
     const resp = await this.client.post<any>('/models/compare', { model_ids: modelIds });
     return resp.data;
@@ -1296,9 +1320,10 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  async setStrategyBinding(strategyId: string, modelId: string): Promise<StrategyModelBinding> {
+  async setStrategyBinding(strategyId: string, modelId: string, force = false): Promise<StrategyModelBinding> {
     const resp = await this.client.put<StrategyModelBinding>(`/models/strategy-bindings/${strategyId}`, {
       model_id: modelId,
+      force,
     });
     return resp.data;
   }

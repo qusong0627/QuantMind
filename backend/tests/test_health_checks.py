@@ -43,7 +43,9 @@ from backend.scripts.diagnose.health import (
 class FakeCtx:
     """注入式上下文假实现：按 SQL 子串给行，按 key 给值。"""
 
-    def __init__(self, rows_by_sql=None, keys=None, values=None, today=None, market="CN"):
+    def __init__(
+        self, rows_by_sql=None, keys=None, values=None, today=None, market="CN"
+    ):
         self._rows = rows_by_sql or {}
         self._keys = keys or []
         self._values = values or {}
@@ -117,8 +119,16 @@ def test_cid_duplicates_scan():
     assert ok.level == "ok" and ok.metrics == {"cid_dup_groups": 0}
     dup = classify_cid_duplicates(
         [
-            {"tenant_id": "default", "user_id": 1, "client_order_id": "sim-r-600036.SH-buy"},
-            {"tenant_id": "default", "user_id": 1, "client_order_id": "sim-r2-000001.SZ-sell"},
+            {
+                "tenant_id": "default",
+                "user_id": 1,
+                "client_order_id": "sim-r-600036.SH-buy",
+            },
+            {
+                "tenant_id": "default",
+                "user_id": 1,
+                "client_order_id": "sim-r2-000001.SZ-sell",
+            },
         ]
     )
     assert dup.level == "fail"
@@ -185,7 +195,9 @@ async def test_c03_detects_dual_key_forms():
 
 @pytest.mark.asyncio
 async def test_c03_single_form_ok():
-    ctx = FakeCtx(keys=["simulation:account:default:1", "simulation:account:default:1:FUTURES"])
+    ctx = FakeCtx(
+        keys=["simulation:account:default:1", "simulation:account:default:1:FUTURES"]
+    )
     r = await check_c03_account_key_consistency(ctx)
     assert r.level == "ok"
 
@@ -199,7 +211,9 @@ async def test_c04_multimarket_sum_matches_snapshot():
         keys=["simulation:account:default:1", "simulation:account:default:1:FUTURES"],
         values={
             "simulation:account:default:1": json.dumps({"total_asset": 1_008_379.58}),
-            "simulation:account:default:1:FUTURES": json.dumps({"total_asset": 1_000_000.0}),
+            "simulation:account:default:1:FUTURES": json.dumps(
+                {"total_asset": 1_000_000.0}
+            ),
         },
         rows_by_sql={
             "simulation_fund_snapshots": [
@@ -265,7 +279,8 @@ def test_c12_partial_missing_is_warn():
 
 def test_c12_nothing_available_is_fail():
     r = classify_local_market_data(
-        {}, {"CN": "CN 日线数据集目录不存在: /data/quantdb/1_kline_data/daily_unadjusted"}
+        {},
+        {"CN": "CN 日线数据集目录不存在: /data/quantdb/1_kline_data/daily_unadjusted"},
     )
     assert r.level == "fail"
     assert "模拟盘撮合" in r.suggestion
@@ -324,7 +339,9 @@ def test_calendar_coverage_counts_db_override_horizon():
     很快就会被人忽略——那才是真正的危险。
     """
     r = classify_calendar_coverage(
-        {"XSHG": (date(2026, 12, 31), "")}, date(2027, 3, 1), {"XSHG": date(2027, 12, 31)}
+        {"XSHG": (date(2026, 12, 31), "")},
+        date(2027, 3, 1),
+        {"XSHG": date(2027, 12, 31)},
     )
 
     assert r.level == "ok", r.detail
@@ -337,7 +354,9 @@ def test_calendar_coverage_counts_db_override_horizon():
 def test_calendar_coverage_override_earlier_than_calendar_does_not_help():
     """override 比真日历还早时不顶用：有效覆盖取**较晚者**，不是「有 override 就 ok」。"""
     r = classify_calendar_coverage(
-        {"XSHG": (date(2026, 12, 31), "")}, date(2026, 10, 15), {"XSHG": date(2026, 1, 15)}
+        {"XSHG": (date(2026, 12, 31), "")},
+        date(2026, 10, 15),
+        {"XSHG": date(2026, 1, 15)},
     )
 
     assert r.level == "warn", r.detail  # 78 天 → 落在告警窗
@@ -430,7 +449,10 @@ def test_c13_override_rows_are_normalised_across_driver_types():
     got = _latest_override_by_market(
         [
             {"market": "CN", "last_day": date(2027, 1, 5)},
-            {"market": "cn", "last_day": "2027-06-30T00:00:00"},  # 小写 + 带时间戳的字符串
+            {
+                "market": "cn",
+                "last_day": "2027-06-30T00:00:00",
+            },  # 小写 + 带时间戳的字符串
             {"market": "CN", "last_day": datetime(2027, 2, 1, 0, 0)},  # 更早的 datetime
             {"market": "SSE", "last_day": None},
             {"market": "", "last_day": date(2030, 1, 1)},
@@ -480,9 +502,12 @@ SYNTH = "qmt-synth-"
 SEED = "legacy-seed:"
 ABSORB = "manual-absorb:"
 RECOVER = "expired-recover:"
+ADJUST = "manual-adjust:"
 
 
-def _parity(trades, ledger, *, index=True, absorb=ABSORB, recover=RECOVER):
+def _parity(
+    trades, ledger, *, index=True, absorb=ABSORB, recover=RECOVER, adjust=ADJUST
+):
     return classify_agent_ledger_parity(
         ledger_parity(
             trades,
@@ -492,6 +517,7 @@ def _parity(trades, ledger, *, index=True, absorb=ABSORB, recover=RECOVER):
             seed_prefix=SEED,
             absorb_prefix=absorb,
             recover_prefix=recover,
+            adjust_prefix=adjust,
         )
     )
 
@@ -586,6 +612,21 @@ def test_c14_expired_recover_rows_are_counted_not_orphaned():
     assert r.metrics["recovered"] == 1
     assert r.metrics["orphans"] == 0
     assert "过期补账 1 条" in r.detail
+
+
+def test_c14_manual_adjust_rows_are_counted_not_orphaned():
+    """期初/人工差异调整流水按定义没有对应成交，单独计数而不是报孤儿。"""
+    r = _parity(
+        [_t("k1")],
+        [
+            _l("k1"),
+            _l(f"{ADJUST}601825.SH:sell:manual", agent="manual", order=""),
+        ],
+    )
+    assert r.level == "ok", r.detail
+    assert r.metrics["adjusted"] == 1
+    assert r.metrics["orphans"] == 0
+    assert "期初/人工调整 1 条" in r.detail
 
 
 def test_c14_only_recover_rows_is_not_participation_failure():
@@ -697,7 +738,12 @@ async def test_c14_check_flags_duplicate_fills_before_parity():
     ctx = FakeCtx(
         {
             "FROM trades WHERE exchange_trade_id IS NOT NULL": [
-                {"tenant_id": "default", "user_id": "1001", "exchange_trade_id": "T9", "c": 2}
+                {
+                    "tenant_id": "default",
+                    "user_id": "1001",
+                    "exchange_trade_id": "T9",
+                    "c": 2,
+                }
             ]
         }
     )
@@ -790,7 +836,9 @@ async def test_c01_batch_missing_with_realtime_rows_is_not_all_hold():
     旧实现把 551 行实时行拼进分布，`str(None)` 落 "None" 桶 → 报「全 HOLD
     （551 行无 BUY/SELL）」——指向闸门坍缩，真相是批量推理没产出。
     """
-    ctx = FakeCtx({_C01_SQL_KEY: [{"source": "realtime", "signal_side": None, "n": 551}]})
+    ctx = FakeCtx(
+        {_C01_SQL_KEY: [{"source": "realtime", "signal_side": None, "n": 551}]}
+    )
     r = await check_c01_signal_distribution(ctx)
 
     assert r.level == "fail"
@@ -865,9 +913,7 @@ def _pin_expected_synced_date(monkeypatch, trade_date: date) -> None:
     """C08 的基准日（上一交易日）同理钉死。"""
     from backend.scripts.diagnose import health as health_mod
 
-    monkeypatch.setattr(
-        health_mod, "expected_synced_date", lambda ctx: trade_date
-    )
+    monkeypatch.setattr(health_mod, "expected_synced_date", lambda ctx: trade_date)
 
 
 @pytest.mark.asyncio
@@ -910,9 +956,7 @@ async def test_c02_five_models_one_run_each_is_not_multi_run(monkeypatch):
             _C02_PRESENT_SQL_KEY: [{"present": 1}],
             _C02_RUNS_SQL_KEY: [{"n": 1, "models": 5}],
         },
-        values={
-            ready_key("CN", "2026-10-19"): '{"run_id": "run_x", "symbols": 3273}'
-        },
+        values={ready_key("CN", "2026-10-19"): '{"run_id": "run_x", "symbols": 3273}'},
     )
     r = await check_c02_signal_readiness(ctx)
 
@@ -1029,7 +1073,9 @@ def test_expected_batch_signal_date_after_the_run_uses_today(monkeypatch):
     ) == date(2026, 11, 6)
 
 
-def test_expected_batch_signal_date_on_non_trading_day_uses_previous_session(monkeypatch):
+def test_expected_batch_signal_date_on_non_trading_day_uses_previous_session(
+    monkeypatch,
+):
     """周末/节假日不产批量，基准落回上一个交易日——否则整周末恒红。"""
     from backend.scripts.diagnose import health as health_mod
 
@@ -1129,7 +1175,11 @@ def test_c17_two_days_stale_is_warn():
 
 def test_c17_five_days_stale_is_fail_and_names_model():
     r = classify_model_score_freshness(
-        "CN", [_entry(model_id="m_slow", stale_days=6), _entry(model_id="m_ok", stale_days=0)]
+        "CN",
+        [
+            _entry(model_id="m_slow", stale_days=6),
+            _entry(model_id="m_ok", stale_days=0),
+        ],
     )
     assert r.level == "fail"
     assert "m_slow" in r.detail
@@ -1236,7 +1286,11 @@ async def test_c16_check_reads_counts_and_sample():
                 {"terminal": 218, "active_recent": 0, "active_historical": 10}
             ],
             "ORDER BY p.created_at DESC LIMIT 20": [
-                {"order_id": "u-1", "status": "submitted", "client_order_id": "sim-e2e-1"}
+                {
+                    "order_id": "u-1",
+                    "status": "submitted",
+                    "client_order_id": "sim-e2e-1",
+                }
             ],
         }
     )
@@ -1269,7 +1323,7 @@ async def test_c16_check_missing_table_is_warn_not_crash():
 
     class _BoomCtx(FakeCtx):
         def query(self, sql, **params):
-            raise RuntimeError("relation \"simulation_orders\" does not exist")
+            raise RuntimeError('relation "simulation_orders" does not exist')
 
     r = await check_c16_projection_orphans(_BoomCtx())
 
@@ -1309,5 +1363,7 @@ def test_c16_sql_pairs_only_against_sim_orders_with_no_fk_assumption():
     「投影在册、台账无据」这个定义就丢了，检查会变成一条永远绿的装饰。
     """
     src = _HEALTH_PY.read_text(encoding="utf-8")
-    assert "NOT EXISTS (SELECT 1 FROM sim_orders s WHERE s.order_id = p.order_id)" in src
+    assert (
+        "NOT EXISTS (SELECT 1 FROM sim_orders s WHERE s.order_id = p.order_id)" in src
+    )
     assert '("C16", "投影孤儿", check_c16_projection_orphans)' in src

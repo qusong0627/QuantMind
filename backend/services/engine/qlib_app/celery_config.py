@@ -75,8 +75,12 @@ REDIS_DB_BACKEND = int(os.getenv("REDIS_DB_BACKEND", "4"))  # Qlib专用backend 
 
 # 构建连接URL
 if REDIS_PASSWORD:
-    BROKER_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}" f"/{REDIS_DB_BROKER}"
-    BACKEND_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}" f"/{REDIS_DB_BACKEND}"
+    BROKER_URL = (
+        f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BROKER}"
+    )
+    BACKEND_URL = (
+        f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BACKEND}"
+    )
 else:
     BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BROKER}"
     BACKEND_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB_BACKEND}"
@@ -91,8 +95,12 @@ celery_app = Celery(
 # 并发/性能参数（可通过环境变量覆盖）
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600"))
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "3300"))
-CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", "1"))
-CELERY_WORKER_MAX_TASKS_PER_CHILD = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "10"))
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(
+    os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", "1")
+)
+CELERY_WORKER_MAX_TASKS_PER_CHILD = int(
+    os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD", "10")
+)
 # 单个子进程 RSS 上限（单位 KiB，Celery 的坑：这里是 KB 不是 MB）。
 # 2026-11-10：近 7 天 15 次 cgroup OOM 全是 celery 撞 12g 硬限（死亡现场
 # anon-rss 11.58G），光靠 max_tasks_per_child=10 兜不住——重负载 job 之间
@@ -102,12 +110,18 @@ CELERY_WORKER_MAX_TASKS_PER_CHILD = int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_C
 CELERY_WORKER_MAX_MEMORY_PER_CHILD = int(
     os.getenv("CELERY_WORKER_MAX_MEMORY_PER_CHILD", str(2_500_000))
 )
-CELERY_WORKER_DISABLE_RATE_LIMITS = os.getenv("CELERY_WORKER_DISABLE_RATE_LIMITS", "false").lower() == "true"
+CELERY_WORKER_DISABLE_RATE_LIMITS = (
+    os.getenv("CELERY_WORKER_DISABLE_RATE_LIMITS", "false").lower() == "true"
+)
 CELERY_TASK_ACKS_LATE = os.getenv("CELERY_TASK_ACKS_LATE", "true").lower() == "true"
-CELERY_TASK_REJECT_ON_WORKER_LOST = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() == "true"
+CELERY_TASK_REJECT_ON_WORKER_LOST = (
+    os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() == "true"
+)
 CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))
 
-CELERY_QUEUE = os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv").strip() or "qlib_backtest_srv"
+CELERY_QUEUE = (
+    os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv").strip() or "qlib_backtest_srv"
+)
 CELERY_EXCHANGE = os.getenv("QLIB_CELERY_EXCHANGE", "qlib")
 CELERY_ROUTING_KEY = os.getenv("QLIB_CELERY_ROUTING_KEY", "qlib.backtest")
 AUTO_INFERENCE_ENABLED = os.getenv("AUTO_INFERENCE_ENABLED", "true").lower() == "true"
@@ -131,6 +145,11 @@ REGIME_PERSIST_ENABLED = os.getenv("REGIME_PERSIST_ENABLED", "true").lower() == 
 # 模型推理成绩单（滚动 1 个月）：16:45 盘后先算「昨天到期」的批次；次日 02:40
 # 等 QuantDB 日线同步后再补算「今天到期」的批次（任务幂等，重复跑只更新）。
 MODEL_SCORECARD_ENABLED = os.getenv("MODEL_SCORECARD_ENABLED", "true").lower() == "true"
+# 模型「测试集实盘力」滚动 3 个月日更（16:50）：只跑默认模型 + 策略绑定模型；
+# 评估 red / 长多连续跑输时给所有者发站内预警。
+MODEL_SIGNAL_EVAL_ENABLED = (
+    os.getenv("MODEL_SIGNAL_EVAL_ENABLED", "true").lower() == "true"
+)
 # 滚动窗口天数（含产出当天）。取数走 orders.ref_price（决策链取价时刻），
 # 补写是 2026-09-24 上的，故窗口开头的成交天然落在「不可定价」——报告里如实分列。
 TCA_REPORT_DAYS = int(os.getenv("TCA_REPORT_DAYS", "30"))
@@ -194,6 +213,15 @@ if MODEL_SCORECARD_ENABLED:
         "task": "engine.tasks.model_scorecard_refresh",
         "schedule": crontab(minute="40", hour="2", day_of_week="1-6"),
         "kwargs": {"top_k": 20},
+    }
+
+# 模型测试集实盘力（2026-11-24）：16:50 盘后，对默认/策略绑定的 A 股模型做
+# 滚动 63 个交易日体检，写历史快照；red 或长多连续跑输时发站内预警。
+if MODEL_SIGNAL_EVAL_ENABLED:
+    beat_schedule["model-signal-eval-refresh"] = {
+        "task": "engine.tasks.model_signal_eval_refresh",
+        "schedule": crontab(minute="50", hour="16", day_of_week="1-5"),
+        "kwargs": {"max_models": 8, "window_days": 63},
     }
 
 # 天风 50 因子日频物化：数据同步时间由用户在前端配置（常见次日 00:00 后），
@@ -333,7 +361,7 @@ if os.getenv("DECISION_LEDGER_SCORECARD_ENABLED", "true").lower() == "true":
 # 08:40 选点：盘前（09:10 risk_tier 之前）且晚于 08:00 auto-inference（读当日
 # 最新批），也避开 08:00 同分钟挤 engine。独立开关 FACTOR_BOARD_ENABLED——注册
 # 表按 switch_env 判「关闭/停摆」，借别的开关会让体检把「本就没开」报成「停摆」
-#（同 TCA/regime 的理由）。
+# （同 TCA/regime 的理由）。
 # 只跑周一~五：板是盘前消费物，每个交易日 08:40 建当日一版；周六就算跑，建的
 # 也是下周一那份（周一 08:40 随即同日期重建覆盖）——纯冗余，不排它。
 if os.getenv("FACTOR_BOARD_ENABLED", "true").lower() == "true":
@@ -381,7 +409,7 @@ if os.getenv("FACTOR_BOARD_RESELECT_ENABLED", "true").lower() == "true":
 # 聪明钱产物（市场分析 · 聪明钱追踪与选股 细案 §7，2026-10-15）：东财晚间发布
 # 节奏不定，19:10 先建一版、21:10 第二档 catch-up（脚本含采集，幂等 + 重叠窗口
 # 自愈，同日重跑覆盖）。落 QM_MARKET_SNAPSHOT_DIR 根下 market-analysis/smart_money
-#（worker 容器未注入该 env 时由 datasets.product_dir 的容器兜底解析 /data），
+# （worker 容器未注入该 env 时由 datasets.product_dir 的容器兜底解析 /data），
 # API/前端读取。独立开关 SMART_MONEY_ENABLED（借别的开关会让体检把「本就没开」
 # 报成「停摆」）。
 if os.getenv("SMART_MONEY_ENABLED", "true").lower() == "true":
@@ -447,6 +475,7 @@ celery_app.conf.update(
     imports=(
         "backend.services.engine.qlib_app.tasks",
         "backend.services.engine.tasks.celery_tasks",
+        "backend.services.engine.tasks.model_signal_eval_tasks",
     ),
     # 监控配置
     worker_send_task_events=True,

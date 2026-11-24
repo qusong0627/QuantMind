@@ -111,7 +111,9 @@ def classify_signal_distribution(counts: dict[str, int]) -> CheckResult:
     """C01 判定：全 HOLD / 分布坍缩 / 正常。"""
     total = sum(counts.values())
     if total == 0:
-        return CheckResult("C01", "信号分布", "fail", "无任何信号数据", "检查推理任务是否执行")
+        return CheckResult(
+            "C01", "信号分布", "fail", "无任何信号数据", "检查推理任务是否执行"
+        )
     buy = counts.get("BUY", 0)
     sell = counts.get("SELL", 0)
     hold = counts.get("HOLD", 0)
@@ -129,15 +131,27 @@ def classify_signal_distribution(counts: dict[str, int]) -> CheckResult:
     side_ratio = max(buy, sell) / total
     if side_ratio > 0.95:
         return CheckResult(
-            "C01", "信号分布", "warn", f"分布坍缩：单侧占比 {side_ratio:.1%}", "核对闸门阈值与当日截面", metrics
+            "C01",
+            "信号分布",
+            "warn",
+            f"分布坍缩：单侧占比 {side_ratio:.1%}",
+            "核对闸门阈值与当日截面",
+            metrics,
         )
-    return CheckResult("C01", "信号分布", "ok", f"BUY {buy} / SELL {sell} / HOLD {hold}", "", metrics)
+    return CheckResult(
+        "C01", "信号分布", "ok", f"BUY {buy} / SELL {sell} / HOLD {hold}", "", metrics
+    )
 
 
 def classify_account_key_forms(forms: set[str], numeric_user: str) -> CheckResult:
     """C03 判定：同一数字用户存在多种键形（如 1 与 00000001）。"""
     if len(forms) <= 1:
-        return CheckResult("C03", f"账户键一致性(u={numeric_user})", "ok", f"键形唯一：{sorted(forms) or ['-']}")
+        return CheckResult(
+            "C03",
+            f"账户键一致性(u={numeric_user})",
+            "ok",
+            f"键形唯一：{sorted(forms) or ['-']}",
+        )
     return CheckResult(
         "C03",
         f"账户键一致性(u={numeric_user})",
@@ -165,7 +179,9 @@ def classify_snapshot_consistency(
     )
 
 
-def classify_ledger_writes(ledger_rows: int, accounts_with_positions: int) -> CheckResult:
+def classify_ledger_writes(
+    ledger_rows: int, accounts_with_positions: int
+) -> CheckResult:
     """C05 判定：PG 台账写入 vs Redis 有持仓账户。"""
     if ledger_rows > 0:
         return CheckResult("C05", "台账写入", "ok", f"PG 台账 {ledger_rows} 行")
@@ -194,7 +210,9 @@ def classify_cid_duplicates(
     """
     rows = [dict(r) for r in (dup_rows or [])]
     if not rows:
-        return CheckResult("C05", "台账写入", "ok", "幂等键无重复", "", {"cid_dup_groups": 0})
+        return CheckResult(
+            "C05", "台账写入", "ok", "幂等键无重复", "", {"cid_dup_groups": 0}
+        )
     sample = "，".join(
         f"{r.get('tenant_id')}:{r.get('user_id')}:{r.get('client_order_id')}"
         for r in rows[:3]
@@ -220,7 +238,12 @@ def classify_ledger_coverage(trades_7d: int, covered_7d: int) -> CheckResult:
     missing = max(0, int(trades_7d) - int(covered_7d))
     if missing == 0:
         return CheckResult(
-            "C05", "台账写入", "ok", f"近 7 日 {trades_7d} 笔成交全部落账", "", {"trades_7d": trades_7d}
+            "C05",
+            "台账写入",
+            "ok",
+            f"近 7 日 {trades_7d} 笔成交全部落账",
+            "",
+            {"trades_7d": trades_7d},
         )
     return CheckResult(
         "C05",
@@ -269,6 +292,10 @@ class LedgerParity:
     #: 当日委托，跨日过期但实际成交的委托没有成交明细行可配 ⇒ 混进 orphans 会让账本环
     #: 在每次补账后常驻 warn（2026-11-23 实测 3 条）。
     recovered: tuple[str, ...] = ()
+    #: 期初/人工差异调整（``manual-adjust:<code>:<side>[:<agent>]``，由
+    #: ``manual_sell_auto_absorb`` 写）：按定义没有对应成交（它记的是窗口起点账本与
+    #: 真实持仓的差），同样不参与配对；混进 orphans 会把每次修账报成「多出来的账」。
+    adjusted: tuple[str, ...] = ()
 
 
 def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
@@ -285,7 +312,9 @@ def _group_by_order(rows: Any) -> dict[tuple[str, str, str], list[dict]]:
     return grouped
 
 
-def _take_exact(index: dict[str, list[int]], used: set[int], fill_key: str) -> int | None:
+def _take_exact(
+    index: dict[str, list[int]], used: set[int], fill_key: str
+) -> int | None:
     """按成交号精确取一行；取走的划掉——同一行不会被两笔成交认领。"""
     for i in index.get(fill_key, ()):
         if i not in used:
@@ -294,7 +323,9 @@ def _take_exact(index: dict[str, list[int]], used: set[int], fill_key: str) -> i
     return None
 
 
-def _take_prefixed(index: dict[str, list[int]], used: set[int], prefix: str) -> int | None:
+def _take_prefixed(
+    index: dict[str, list[int]], used: set[int], prefix: str
+) -> int | None:
     """取一行**合成键**流水（``qmt-synth-…``）：合成成交先落账、真实明细到达后就地升级
     改了成交行 ``exchange_trade_id``，而账本流水按「流水即事实」不跟着改键——这是登记在
     ``agent_ledger_fill`` 里的**有界偏差**，对账必须认这个配对，否则每笔升级都会报漏记。
@@ -318,6 +349,7 @@ def ledger_parity(
     seed_prefix: str,
     absorb_prefix: str | tuple[str, ...] = "",
     recover_prefix: str = "",
+    adjust_prefix: str = "",
 ) -> LedgerParity:
     """逐单配对（纯函数）：成交行 ↔ 账本流水行，分成五类偏差。
 
@@ -349,6 +381,7 @@ def ledger_parity(
     seeds: list[str] = []
     absorbed: list[str] = []
     recovered: list[str] = []
+    adjusted: list[str] = []
 
     for key in sorted(set(trades_by_order) | set(ledger_by_order)):
         order_id = key[2]
@@ -365,6 +398,9 @@ def ledger_parity(
             if recover_prefix and fill_key.startswith(recover_prefix):
                 recovered.append(f"{order_id}:{fill_key}")
                 continue
+            if adjust_prefix and fill_key.startswith(adjust_prefix):
+                adjusted.append(f"{order_id}:{fill_key}")
+                continue
             by_fill_key.setdefault(fill_key, []).append(i)
             if float(row.get("applied_volume") or 0.0) == 0.0:
                 unapplied.append(f"{order_id}:{fill_key}")
@@ -380,7 +416,9 @@ def ledger_parity(
                 continue
             booked = str(pool[partner].get("agent") or "")
             if booked != agent:
-                mismatch.append(f"{order_id}:{fill_key}（订单 {agent} / 账本 {booked}）")
+                mismatch.append(
+                    f"{order_id}:{fill_key}（订单 {agent} / 账本 {booked}）"
+                )
                 continue
             posted += 1
         for i, row in enumerate(pool):
@@ -393,6 +431,8 @@ def ledger_parity(
                 continue  # 上面已归 absorbed
             if recover_prefix and fill_key.startswith(recover_prefix):
                 continue  # 上面已归 recovered
+            if adjust_prefix and fill_key.startswith(adjust_prefix):
+                continue  # 上面已归 adjusted
             if fill_key.startswith(synth_prefix):
                 dup_posts.append(f"{order_id}:{fill_key}")
             else:
@@ -412,6 +452,7 @@ def ledger_parity(
         seeds=tuple(seeds),
         absorbed=tuple(absorbed),
         recovered=tuple(recovered),
+        adjusted=tuple(adjusted),
     )
 
 
@@ -490,6 +531,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "seeds": len(p.seeds),
         "absorbed": len(p.absorbed),
         "recovered": len(p.recovered),
+        "adjusted": len(p.adjusted),
         "trade_unique_index": p.index_enabled,
     }
     index_note = "" if p.index_enabled else "；成交唯一键未启用（并发双写无 DB 兜底）"
@@ -503,7 +545,8 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
     seed_note = f"，另含期初结转 {len(p.seeds)} 条" if p.seeds else ""
     absorb_note = f"，另含人工卖单吸收 {len(p.absorbed)} 条" if p.absorbed else ""
     recover_note = f"，另含过期补账 {len(p.recovered)} 条" if p.recovered else ""
-    extra_rows = len(p.seeds) + len(p.absorbed) + len(p.recovered)
+    adjust_note = f"，另含期初/人工调整 {len(p.adjusted)} 条" if p.adjusted else ""
+    extra_rows = len(p.seeds) + len(p.absorbed) + len(p.recovered) + len(p.adjusted)
     if p.trades == 0 and p.ledger_rows == extra_rows:
         if p.index_enabled:
             return CheckResult(
@@ -511,6 +554,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
                 "分账账本一致性",
                 "ok",
                 f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}{recover_note}"
+                f"{adjust_note}"
                 "（分账未参与）",
                 metrics=metrics,
             )
@@ -519,7 +563,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
             "分账账本一致性",
             "warn",
             f"近 30 日无 LLM 腿成交、账本无本仓流水{seed_note}{absorb_note}{recover_note}"
-            f"（分账未参与）{index_note}",
+            f"{adjust_note}（分账未参与）{index_note}",
             index_fix,
             metrics,
         )
@@ -546,7 +590,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
             "分账账本一致性",
             "ok",
             f"近 30 日 {p.trades} 笔 LLM 腿成交全部落账（账本 {p.ledger_rows} 行，"
-            f"归属一致{seed_note}{absorb_note}{recover_note}）",
+            f"归属一致{seed_note}{absorb_note}{recover_note}{adjust_note}）",
             metrics=metrics,
         )
     return CheckResult(
@@ -554,7 +598,7 @@ def classify_agent_ledger_parity(p: LedgerParity) -> CheckResult:
         "分账账本一致性",
         level,
         f"近 30 日 {p.trades} 笔 LLM 腿成交 / 账本 {p.ledger_rows} 行"
-        f"{seed_note}{absorb_note}{recover_note}：" + "；".join(parts),
+        f"{seed_note}{absorb_note}{recover_note}{adjust_note}：" + "；".join(parts),
         " ".join(dict.fromkeys(suggestions)),
         metrics,
     )
@@ -625,7 +669,10 @@ def expected_batch_signal_date(ctx: HealthContext, now: datetime | None = None) 
     """
     now = now or datetime.now()
     today = ctx.today
-    if is_trading_day(today, ctx.market) and now.strftime("%H:%M") >= BATCH_SIGNAL_READY_HHMM:
+    if (
+        is_trading_day(today, ctx.market)
+        and now.strftime("%H:%M") >= BATCH_SIGNAL_READY_HHMM
+    ):
         return today
     return previous_trading_day(today, ctx.market) or (today - timedelta(days=1))
 
@@ -758,7 +805,9 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
             },
         )
     ready_desc = (
-        f"就绪标记={str(ready_raw)[:48]}…" if ready_raw else "无就绪标记（回退读完成标记）"
+        f"就绪标记={str(ready_raw)[:48]}…"
+        if ready_raw
+        else "无就绪标记（回退读完成标记）"
     )
     detail = f"{latest_str} {ready_desc} runs={runs}（{models} 个模型）"
     metrics = {
@@ -769,7 +818,11 @@ async def check_c02_signal_readiness(ctx: HealthContext) -> CheckResult:
     }
     if runs > 2:
         return CheckResult(
-            "C02", "信号就绪", "warn", detail + "（同日多 run，检查竞态/回填）", metrics=metrics
+            "C02",
+            "信号就绪",
+            "warn",
+            detail + "（同日多 run，检查竞态/回填）",
+            metrics=metrics,
         )
     return CheckResult("C02", "信号就绪", "ok", detail, metrics=metrics)
 
@@ -785,14 +838,22 @@ async def check_c03_account_key_consistency(ctx: HealthContext) -> CheckResult:
         if not user.isdigit():
             continue
         grouped.setdefault((tenant, str(int(user))), set()).add(user)
-    bad = [classify_account_key_forms(forms, num) for (_, num), forms in grouped.items() if len(forms) > 1]
+    bad = [
+        classify_account_key_forms(forms, num)
+        for (_, num), forms in grouped.items()
+        if len(forms) > 1
+    ]
     if bad:
-        return bad[0] if len(bad) == 1 else CheckResult(
-            "C03",
-            "账户键一致性",
-            "fail",
-            f"{len(bad)} 个用户存在多键形：" + "; ".join(r.detail for r in bad),
-            "统一 require_sim_user_id 归一口径",
+        return (
+            bad[0]
+            if len(bad) == 1
+            else CheckResult(
+                "C03",
+                "账户键一致性",
+                "fail",
+                f"{len(bad)} 个用户存在多键形：" + "; ".join(r.detail for r in bad),
+                "统一 require_sim_user_id 归一口径",
+            )
         )
     return CheckResult("C03", "账户键一致性", "ok", f"扫描 {len(keys)} 键，无多键形")
 
@@ -830,13 +891,18 @@ async def check_c04_snapshot_consistency(ctx: HealthContext) -> CheckResult:
         f"{market_clause}"
     )
     # 快照的用户键是账户键解析原文；Redis 侧同口径比对
-    snapshot_total = {(str(r["tenant_id"]), str(r["user_id"])): float(r["total_asset"] or 0) for r in rows}
+    snapshot_total = {
+        (str(r["tenant_id"]), str(r["user_id"])): float(r["total_asset"] or 0)
+        for r in rows
+    }
     checked = 0
     for (tenant, user), redis_total in per_user.items():
         if (tenant, user) not in snapshot_total:
             continue
         checked += 1
-        result = classify_snapshot_consistency(redis_total, snapshot_total[(tenant, user)])
+        result = classify_snapshot_consistency(
+            redis_total, snapshot_total[(tenant, user)]
+        )
         if result.level != "ok":
             result.id = "C04"
             result.detail = f"u={tenant}:{user} " + result.detail
@@ -920,7 +986,13 @@ async def check_c06_reconcile_diff(ctx: HealthContext) -> CheckResult:
     if diff is None:
         return CheckResult("C06", "对账差异", "warn", "报告无差异字段，无法判定")
     if diff > 0:
-        return CheckResult("C06", "对账差异", "fail", f"最近一次对账 {diff} 处差异", "查 reconcile_reports 明细")
+        return CheckResult(
+            "C06",
+            "对账差异",
+            "fail",
+            f"最近一次对账 {diff} 处差异",
+            "查 reconcile_reports 明细",
+        )
     return CheckResult("C06", "对账差异", "ok", "最近一次对账零差异")
 
 
@@ -1007,7 +1079,9 @@ async def check_c08_data_sync_freshness(ctx: HealthContext) -> CheckResult:
     from backend.services.engine.tasks.market_sync_scheduler import sync_market_token
 
     token = sync_market_token(ctx.market)
-    marker = ctx.redis_get(f"quantmind:sync_schedule_last_run:{token}:{d}", REDIS_DB_GENERAL)
+    marker = ctx.redis_get(
+        f"quantmind:sync_schedule_last_run:{token}:{d}", REDIS_DB_GENERAL
+    )
     if not marker:
         return CheckResult(
             "C08",
@@ -1032,7 +1106,11 @@ async def check_c09_remote_quote_config(ctx: HealthContext) -> CheckResult:
     resolved = resolve_remote_quote_redis()
     if resolved is None:
         return CheckResult(
-            "C09", "远端行情配置", "warn", "远端行情已禁用/未配置（撮合走本地日线兜底）", "如需盘中实时取价，配置 REMOTE_QUOTE_REDIS_*"
+            "C09",
+            "远端行情配置",
+            "warn",
+            "远端行情已禁用/未配置（撮合走本地日线兜底）",
+            "如需盘中实时取价，配置 REMOTE_QUOTE_REDIS_*",
         )
     host, port, _password, db = resolved
     return CheckResult("C09", "远端行情配置", "ok", f"{host}:{port}/db{db}")
@@ -1051,7 +1129,9 @@ async def check_c10_initial_seed_presence(ctx: HealthContext) -> CheckResult:
             continue
         has_seed = acc.get("initial_cash") is not None
         positions = acc.get("positions") or {}
-        traded = any(float((p or {}).get("volume") or 0) > 0 for p in positions.values())
+        traded = any(
+            float((p or {}).get("volume") or 0) > 0 for p in positions.values()
+        )
         if traded and not has_seed:
             # CN 可回退 settings；非 CN 无种子即"未知"（快照求和时被排除）
             market = str(acc.get("market") or "").upper()
@@ -1226,7 +1306,9 @@ def classify_calendar_coverage(
         metrics[f"{name}_remaining_days"] = remaining
         if override_last is not None and (last is None or override_last > last):
             origin = (
-                f"真日历只到 {last.isoformat()}" if last else f"真日历取不到：{reason or '未知原因'}"
+                f"真日历只到 {last.isoformat()}"
+                if last
+                else f"真日历取不到：{reason or '未知原因'}"
             )
             parts.append(
                 f"{name} 覆盖到 {effective.isoformat()}（剩 {remaining} 天，"
@@ -1338,9 +1420,13 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
     模拟盘（``sim_trades``）不写账本。窗口 :data:`AGENT_LEDGER_WINDOW_DAYS` 天，
     两侧各放宽 :data:`AGENT_LEDGER_WINDOW_SLACK_DAYS` 天（见该常量）。
     """
-    from backend.shared.decision.agent_ledger import RECOVER_FILL_PREFIX, SEED_FILL_PREFIX
+    from backend.shared.decision.agent_ledger import (
+        RECOVER_FILL_PREFIX,
+        SEED_FILL_PREFIX,
+    )
     from backend.shared.decision.manual_sell_absorption import (
         FILL_KEY_PREFIX as MANUAL_ABSORB_PREFIX,
+        MANUAL_ADJUST_PREFIX,
         MANUAL_BUY_PREFIX,
     )
     from backend.shared.trade_contract import (
@@ -1412,6 +1498,7 @@ async def check_c14_agent_ledger_parity(ctx: HealthContext) -> CheckResult:
             absorb_prefix=(f"{MANUAL_ABSORB_PREFIX}:", f"{MANUAL_BUY_PREFIX}:"),
             seed_prefix=SEED_FILL_PREFIX,
             recover_prefix=f"{RECOVER_FILL_PREFIX}:",
+            adjust_prefix=f"{MANUAL_ADJUST_PREFIX}:",
         )
     )
 
@@ -1464,9 +1551,7 @@ def classify_model_artifact_drift(
     )
 
 
-def classify_model_score_freshness(
-    market: str, entries: list[dict]
-) -> CheckResult:
+def classify_model_score_freshness(market: str, entries: list[dict]) -> CheckResult:
     """C17 判定（纯函数）：默认模型的 pred.parquet 最后分数日是否落后。
 
     entries: [{model_id, last_date(str|None), stale_days(int|None)}]
@@ -1485,11 +1570,10 @@ def classify_model_score_freshness(
         )
     missing = [e for e in entries if not e.get("last_date")]
     scored = [e for e in entries if e.get("last_date")]
-    stale_pairs = [
-        (e, int(e.get("stale_days") or 0)) for e in scored
-    ]
+    stale_pairs = [(e, int(e.get("stale_days") or 0)) for e in scored]
     stale_pairs.sort(key=lambda x: x[1], reverse=True)
-    worst_model, worst_days = (stale_pairs[0] if stale_pairs else (None, 0))
+    worst_model, worst_days = stale_pairs[0] if stale_pairs else (None, 0)
+
     def _label(e: dict) -> str:
         return (
             f"{e.get('model_id')}(u={e.get('user_id')})"
@@ -1507,7 +1591,9 @@ def classify_model_score_freshness(
     }
     if missing:
         sample = "，".join(
-            f"{e.get('model_id')}(u={e.get('user_id')})" if e.get("user_id") else str(e.get("model_id"))
+            f"{e.get('model_id')}(u={e.get('user_id')})"
+            if e.get("user_id")
+            else str(e.get("model_id"))
             for e in missing[:3]
         )
         return CheckResult(
@@ -1575,9 +1661,7 @@ async def check_c17_model_score_freshness(ctx: HealthContext) -> CheckResult:
                     ctx.market, last_d + timedelta(days=1), expected
                 )
                 stale_days = (
-                    len(days)
-                    if days is not None
-                    else max(0, (expected - last_d).days)
+                    len(days) if days is not None else max(0, (expected - last_d).days)
                 )
             except (TypeError, ValueError):
                 stale_days = None
@@ -1746,7 +1830,8 @@ def classify_real_position_parity(
             "C18",
             "真实持仓一致性",
             "fail",
-            "；".join(diffs[:5]) + (f"（共 {len(diffs)} 只）" if len(diffs) > 5 else ""),
+            "；".join(diffs[:5])
+            + (f"（共 {len(diffs)} 只）" if len(diffs) > 5 else ""),
             "人工买卖未入账或账本漂移：跑 manual_sell_absorb_task 吸收，"
             "并核对 orders 是否有跨日重复委托",
             metrics,
@@ -1884,8 +1969,12 @@ def _build_context(market: str = "CN") -> HealthContext:
     redis_host = os.getenv("REDIS_HOST", "redis")
     redis_port = int(os.getenv("REDIS_PORT", "6379"))
     clients = {
-        REDIS_DB_GENERAL: redis_lib.Redis(host=redis_host, port=redis_port, db=REDIS_DB_GENERAL),
-        REDIS_DB_TRADE: redis_lib.Redis(host=redis_host, port=redis_port, db=REDIS_DB_TRADE),
+        REDIS_DB_GENERAL: redis_lib.Redis(
+            host=redis_host, port=redis_port, db=REDIS_DB_GENERAL
+        ),
+        REDIS_DB_TRADE: redis_lib.Redis(
+            host=redis_host, port=redis_port, db=REDIS_DB_TRADE
+        ),
     }
 
     def query(sql: str, **params) -> list[dict]:
@@ -1900,7 +1989,10 @@ def _build_context(market: str = "CN") -> HealthContext:
         return raw.decode() if isinstance(raw, bytes) else str(raw)
 
     def redis_scan(pattern: str, db: int) -> list[str]:
-        return [k.decode() if isinstance(k, bytes) else str(k) for k in clients[db].scan_iter(pattern)]
+        return [
+            k.decode() if isinstance(k, bytes) else str(k)
+            for k in clients[db].scan_iter(pattern)
+        ]
 
     from backend.shared.simulation_account_keys import normalize_market
 
@@ -1944,7 +2036,14 @@ def main() -> int:
 
     counts = summarize(results)
     if args.json:
-        print(json.dumps({"summary": counts, "results": [r.__dict__ for r in results]}, ensure_ascii=False, indent=2, default=str))
+        print(
+            json.dumps(
+                {"summary": counts, "results": [r.__dict__ for r in results]},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
     else:
         print(f"\n合计: ok={counts['ok']} warn={counts['warn']} fail={counts['fail']}")
     return exit_code(results)
