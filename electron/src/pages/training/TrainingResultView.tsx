@@ -112,7 +112,7 @@ interface FactorReportRow {
 }
 
 /** 因子筛选报告：漏斗 + 每特征 IC/ICIR/覆盖/PFS/淘汰原因（train.py select_top_factors 产出）。 */
-const FactorSelectionReport: React.FC<{ report: any }> = ({ report }) => {
+export const FactorSelectionReport: React.FC<{ report: any }> = ({ report }) => {
   const sc: Record<string, number> = report?.stage_counts || {};
   const thr: Record<string, number | null> = report?.thresholds || {};
   const features: FactorReportRow[] = Array.isArray(report?.features) ? report.features : [];
@@ -362,7 +362,7 @@ const LineageItem: React.FC<{ label: string; value?: string }> = ({ label, value
 const SEGMENT_LABELS: Record<string, string> = { valid: '验证集', test: '测试集', custom: '自定义窗口' };
 
 /** WP2 严格评估：净 Top-N（可成交 + 三档成本 + HAC/PSR + 换手）。 */
-const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
+export const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
   const [loading, setLoading] = React.useState(false);
   const [row, setRow] = React.useState<StrictEvalReportRow | null>(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
@@ -575,7 +575,7 @@ const StrictEvalSection: React.FC<{ runId?: string }> = ({ runId }) => {
 };
 
 /** WP6 run 对比：贴 run_id（2~5 个），同口径严格评估 + 配置 diff + 单轴判定。 */
-const CompareRunsModal: React.FC<{
+export const CompareRunsModal: React.FC<{
   open: boolean;
   onClose: () => void;
   defaultRunId?: string;

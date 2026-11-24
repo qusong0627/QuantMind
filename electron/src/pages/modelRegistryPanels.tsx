@@ -47,7 +47,7 @@ import {
 } from './modelRegistryUtils';
 import { ensembleMemberIds, isEnsembleModel } from './fusionUtils';
 import { SignalEvalPanel } from './SignalEvalPanel';
-import { TrainingRunDetailTabs } from './training/TrainingRunDetailTabs';
+import { TrainingProvenanceView } from './training/TrainingProvenanceView';
 const { Text } = Typography;
 
 const MARKET_LABELS: Record<string, string> = {
@@ -1662,6 +1662,7 @@ export const TrainingSourcePanel: React.FC<{
 }> = ({ model, trainingRun, loading: externalLoading = false }) => {
   const [runData, setRunData] = useState<ModelTrainingRunStatus | null>(null);
   const [localLoading, setLocalLoading] = useState(false);
+  const [localError, setLocalError] = useState('');
   const useExternalRun = trainingRun !== undefined;
 
   useEffect(() => {
@@ -1669,6 +1670,8 @@ export const TrainingSourcePanel: React.FC<{
       return;
     }
     let isMounted = true;
+    setRunData(null);
+    setLocalError('');
     if (model.source_run_id && model.source_run_id !== '—') {
       setLocalLoading(true);
       modelTrainingService.getTrainingRun(model.source_run_id)
@@ -1680,28 +1683,33 @@ export const TrainingSourcePanel: React.FC<{
         })
         .catch(err => {
           console.error("Failed to fetch logs:", err);
-          if (isMounted) setLocalLoading(false);
+          if (isMounted) {
+            setLocalError(err instanceof Error ? err.message : '训练详情加载失败');
+            setLocalLoading(false);
+          }
         });
+    } else {
+      setLocalLoading(false);
     }
     return () => { isMounted = false; };
   }, [model.source_run_id, useExternalRun]);
 
   const effectiveRunData = useExternalRun ? trainingRun : runData;
   const isLoading = useExternalRun ? externalLoading : localLoading;
+  const effectiveError = useExternalRun ? '' : localError;
 
   return (
-    <div className="h-[calc(var(--app-h)-340px)] overflow-y-auto custom-scrollbar px-1 pt-2 pb-2">
-      <TrainingRunDetailTabs
-        runId={model.source_run_id}
-        meta={{
-          display_name: modelDisplayName(model),
-          created_at: model.created_at,
-        }}
-        detail={effectiveRunData ?? null}
-        loading={isLoading}
-        compact
-      />
-    </div>
+    <TrainingProvenanceView
+      runId={model.source_run_id}
+      meta={{
+        display_name: modelDisplayName(model),
+        market: model.market,
+        created_at: model.created_at,
+      }}
+      detail={effectiveRunData ?? null}
+      loading={isLoading}
+      error={effectiveError}
+    />
   );
 };
 
