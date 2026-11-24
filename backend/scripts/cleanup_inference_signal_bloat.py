@@ -189,6 +189,8 @@ def main() -> int:
             dry_run=not args.apply,
         )
         print(f"  status={res.get('status')} users={res.get('users')}")
+        if res.get("indexes_created"):
+            print(f"  补齐治理索引: {', '.join(res['indexes_created'])}")
         for k, v in (res.get("stats") or {}).items():
             print(f"  {k:<36} {v}")
         if res.get("note"):

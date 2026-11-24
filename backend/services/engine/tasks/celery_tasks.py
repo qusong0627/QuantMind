@@ -1277,10 +1277,11 @@ def purge_inference_signal_storage_task(
         logger.exception("[SignalStorageJanitor] 失败: %s", exc)
         return {"status": "failed", "error": str(exc)}
     logger.info(
-        "[SignalStorageJanitor] retention=%dd dry_run=%s users=%s stats=%s",
+        "[SignalStorageJanitor] retention=%dd dry_run=%s users=%s indexes=%s stats=%s",
         days,
         bool(dry_run),
         result.get("users"),
+        result.get("indexes_created"),
         result.get("stats"),
     )
     return result

@@ -78,6 +78,37 @@ def _user_pairs(db: Any) -> list[tuple[str, str]]:
     return [(str(r[0] or "default"), str(r[1] or "")) for r in rows]
 
 
+# 治理自身依赖的索引。db_init.sql 里也有一份，但那条路径靠不住：
+# 镜像内没有 psql 时会退到 `_ensure_database_schema_python()`，它把整个 SQL
+# 当成一次 multi-statement execute，任何一句报错就整批回滚且不重放，
+# 于是新索引可能永远没建上（线上实测就是这样，索引只能靠这里自愈）。
+_GOVERNANCE_INDEX_DDL = [
+    """
+    CREATE INDEX IF NOT EXISTS idx_qrcs_tenant_user_ptd
+        ON qm_research_candidate_snapshot (tenant_id, user_id, prediction_trade_date DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_qrcs_tenant_user_model_data
+        ON qm_research_candidate_snapshot (tenant_id, user_id, model_id, data_trade_date)
+    """,
+]
+
+
+def ensure_governance_indexes(db: Any) -> list[str]:
+    """幂等补齐治理索引；单条失败只告警，不影响其余清理动作。"""
+    from sqlalchemy import text as sa_text
+
+    created: list[str] = []
+    for ddl in _GOVERNANCE_INDEX_DDL:
+        name = ddl.split("IF NOT EXISTS")[1].strip().split()[0]
+        try:
+            db.execute(sa_text(ddl))
+            created.append(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SignalStorageJanitor] 建索引 %s 失败: %s", name, exc)
+    return created
+
+
 def purge_signal_storage(
     *,
     retention_days: int | None = None,
@@ -122,6 +153,9 @@ def purge_signal_storage(
         }
     stats: dict[str, int] = {}
     try:
+        # 先补齐治理索引：守卫/清理都是按 (tenant,user,日期) 过滤，缺索引时
+        # 84 万行级别就是全表扫描，反而把治理本身变成负载来源。
+        indexes_created = ensure_governance_indexes(db)
         pairs = _user_pairs(db)
         if tenant_id or user_id:
             pairs = [
@@ -141,7 +175,7 @@ def purge_signal_storage(
                 {"floor": signal_floor},
             ),
             (
-                # 明细已不在窗口内、且同日已无任何 run 存活的孤儿快照
+                # 候选快照按信号生效日超窗清理（与 Step 0.1 同口径）
                 "candidate_snapshot_expired",
                 """
                 SELECT count(*) FROM qm_research_candidate_snapshot
@@ -249,6 +283,7 @@ def purge_signal_storage(
             "run_history_retention_days": run_days,
             "dispatch_log_retention_days": log_days,
             "signal_floor": signal_floor,
+            "indexes_created": indexes_created,
             "stats": stats,
             # DELETE 不回收磁盘，需要空间还给 OS 时另行 pg_repack / VACUUM FULL
             "note": "如需把空间归还操作系统，请在低峰执行 pg_repack 或 VACUUM FULL",
