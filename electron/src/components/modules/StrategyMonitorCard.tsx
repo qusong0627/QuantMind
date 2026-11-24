@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { TrendingUp, TrendingDown, Activity, AlertTriangle, CheckCircle, Clock, RefreshCw, WifiOff, X, Wifi } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useStrategies } from '../../hooks/useStrategies';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { StrategyMonitorSkeleton } from '../common/CardSkeletons';
 import { formatBackendTime } from '../../utils/format';
 
@@ -31,6 +33,7 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
   onCloseExpand,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const currentMarket = useAppSelector(selectCurrentMarket);
 
   const {
     strategies,
@@ -42,7 +45,7 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
     lastUpdatedAt,
     realtimeStatus,
     refresh,
-  } = useStrategies({ autoRefresh: true, refreshInterval: 10000, enableRealtime: true });
+  } = useStrategies({ autoRefresh: true, refreshInterval: 10000, enableRealtime: true, market: currentMarket });
 
   const formatAmount = (value: number) => {
     const formatter = new Intl.NumberFormat('zh-CN', {

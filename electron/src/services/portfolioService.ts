@@ -247,11 +247,12 @@ class PortfolioService {
      * 获取持仓分布
      * @param userId 用户ID
      */
-    async getPositionDistribution(userId: string, tradingMode?: 'real' | 'simulation'): Promise<PositionDistribution[]> {
+    async getPositionDistribution(userId: string, tradingMode?: 'real' | 'simulation', market?: string): Promise<PositionDistribution[]> {
         try {
             return await this.client.get<PositionDistribution[]>(API_ENDPOINTS.PORTFOLIO_DISTRIBUTION, {
                 user_id: userId,
-                trading_mode: tradingMode?.toUpperCase()
+                trading_mode: tradingMode?.toUpperCase(),
+                ...(market ? { market: String(market).toUpperCase() } : {}),
             });
         } catch (error) {
             console.warn('获取持仓分布失败:', error);

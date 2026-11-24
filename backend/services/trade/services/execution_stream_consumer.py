@@ -17,6 +17,7 @@ from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.models.trade import Trade
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.notification_publisher import publish_notification_async
+from backend.shared.symbol_market import market_of_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +416,7 @@ class ExecutionStreamConsumer:
                     type="trading",
                     level="error",
                     action_url="/trading",
+                    market=market_of_symbol(order.symbol),
                 )
 
     async def _handle_order_filled(self, fields: dict[str, Any]) -> None:
@@ -474,6 +476,7 @@ class ExecutionStreamConsumer:
                     type="trading",
                     level="success",
                     action_url="/trading",
+                    market=market_of_symbol(order.symbol),
                 )
             elif order.filled_quantity > 0:
                 order.status = OrderStatus.PARTIALLY_FILLED
@@ -500,6 +503,7 @@ class ExecutionStreamConsumer:
                     type="trading",
                     level="info",
                     action_url="/trading",
+                    market=market_of_symbol(order.symbol),
                 )
 
                 # [Automation] 1分钟超时自动轮转买入逻辑

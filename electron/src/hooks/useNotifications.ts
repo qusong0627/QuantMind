@@ -45,6 +45,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
     days,
     autoRefresh = true,
     refreshInterval = DEFAULT_POLLING_INTERVAL,
+    market,
   } = options;
 
   const [notifications, setNotifications] = useState<BusinessNotification[]>([]);
@@ -138,7 +139,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
 
       const currentOffset = append ? notificationsRef.current.length : 0;
 
-      const response = await userService.getNotifications({ limit, days, offset: currentOffset });
+      const response = await userService.getNotifications({ limit, days, offset: currentOffset, market });
 
       if (response.success && response.data) {
         const incoming = response.data.items || [];
@@ -193,7 +194,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
         setLoading(false);
       }
     }
-  }, [applyNotificationsSnapshot, days, limit]);
+  }, [applyNotificationsSnapshot, days, limit, market]);
 
   const refresh = useCallback(async () => {
     await fetchData({ silent: true, append: false });
@@ -287,7 +288,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
 
   useEffect(() => {
     fetchData({ silent: false });
-  }, []);
+  }, [market]);
 
   useEffect(() => {
     if (!autoRefresh) {
@@ -328,7 +329,12 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
 
   useEffect(() => {
     realtimeHandlerRef.current = (payload: unknown) => {
-      const raw = payload as { id?: number; title?: string; content?: string; type?: string; level?: string; action_url?: string; created_at?: string; is_read?: boolean };
+      const raw = payload as { id?: number; title?: string; content?: string; type?: string; level?: string; action_url?: string; created_at?: string; is_read?: boolean; market?: string };
+      // 通知带市场归属时，只在对应市场提示（全局通知照常提示）
+      const rawMarket = raw?.market ? String(raw.market).toUpperCase() : null;
+      if (rawMarket && market && rawMarket !== String(market).toUpperCase()) {
+        return;
+      }
       const nextNotification: BusinessNotification = {
         id: Number(raw?.id ?? 0),
         title: String(raw?.title ?? '系统通知'),
@@ -383,7 +389,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}): UseNoti
       websocketService.removeStatusHandler(statusHandler);
       disconnectRealtime();
     };
-  }, [applyNotificationsSnapshot, connectRealtime, disconnectRealtime]);
+  }, [applyNotificationsSnapshot, connectRealtime, disconnectRealtime, market]);
 
   return {
     notifications,

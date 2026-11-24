@@ -54,6 +54,9 @@ class Notification(Base):
     )
     expires_at = Column(DateTime(timezone=True), comment="过期时间")
 
+    # 归属市场：NULL = 全局（所有市场可见），否则仅该市场可见
+    market = Column(String(16), index=True, comment="市场: CN/HK/US/FUTURES/CRYPTO/CUSTOM")
+
     def __repr__(self):
         return (
             f"<Notification(id={self.id}, title={self.title}, is_read={self.is_read})>"

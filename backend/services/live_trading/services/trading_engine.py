@@ -22,6 +22,7 @@ from backend.services.live_trading.services.risk_service import RiskService
 from backend.services.trade_shared.services.trade_service import TradeService
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.notification_publisher import publish_notification_async
+from backend.shared.symbol_market import market_of_symbol
 from backend.shared.trade_account_cache import write_trade_account_cache
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,7 @@ class TradingEngine:
                         type="trading",
                         level="error",
                         action_url="/trading",
+                        market=market_of_symbol(order.symbol),
                     )
                 )
                 return
@@ -253,6 +255,7 @@ class TradingEngine:
                         type="trading",
                         level="success",
                         action_url="/trading",
+                        market=market_of_symbol(order.symbol),
                     )
                 )
             else:
@@ -278,6 +281,7 @@ class TradingEngine:
                         type="trading",
                         level="info",
                         action_url="/trading",
+                        market=market_of_symbol(order.symbol),
                     )
                 )
 
@@ -303,6 +307,7 @@ class TradingEngine:
                     type="trading",
                     level="warning",
                     action_url="/trading",
+                    market=market_of_symbol(order.symbol),
                 )
             )
         except Exception as e:
@@ -318,6 +323,7 @@ class TradingEngine:
                     type="trading",
                     level="error",
                     action_url="/trading",
+                    market=market_of_symbol(order.symbol),
                 )
             )
 
@@ -640,7 +646,8 @@ class TradingEngine:
                 title="触发权重轮转补位",
                 content=f"由于 {original_symbol} 挂单超时已撤销，系统自动按权重尝试买入下一只备选：{next_target['symbol']}",
                 type="trading",
-                level="info"
+                level="info",
+                market=market_of_symbol(next_target["symbol"]),
             )
 
             # 此处返回建议，实际上可能需要创建一个新的 Order 对象并调用 submit_order

@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { Bell, AlertCircle, TrendingUp, Settings, ArrowRight, RefreshCw, WifiOff, X, CheckCheck, Trash2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { setCurrentTab } from '../../store/slices/aiStrategySlice';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useNotifications, resolveNotificationTarget, getNavigationHint } from '../../hooks/useNotifications';
 import { getRelativeTime } from '../../utils/format';
 import { NotificationSkeleton } from '../common/CardSkeletons';
@@ -32,6 +33,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
   const [isHovered, setIsHovered] = useState(false);
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const currentMarket = useSelector(selectCurrentMarket);
   const setBacktestModule = useBacktestCenterStore((state) => state.setActiveModule);
 
   const {
@@ -50,7 +52,7 @@ export const NotificationQuickCard: React.FC<NotificationQuickCardProps> = ({
     clearNotifications,
     markAsRead,
     markAllAsRead,
-  } = useNotifications({ limit: expanded ? 20 : 10, days: 7, autoRefresh: true });
+  } = useNotifications({ limit: expanded ? 20 : 10, days: 7, autoRefresh: true, market: currentMarket });
 
   const handleNavigation = (target: NotificationRouteTarget) => {
     if (target === 'backtest-history') {

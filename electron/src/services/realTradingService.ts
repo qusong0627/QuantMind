@@ -887,11 +887,13 @@ export const realTradingService = {
         return response.data?.data || null;
     },
 
-    // Get Simulation Fund Snapshots (from DB table simulation_fund_snapshots)
-    getSimulationDailySnapshots: async (days: number = 1): Promise<SimulationFundSnapshot[]> => {
+    // Get Simulation Fund Snapshots (from DB table simulation_fund_snapshots / 分市场快照)
+    getSimulationDailySnapshots: async (days: number = 1, market?: string): Promise<SimulationFundSnapshot[]> => {
         const token = authService.getAccessToken();
+        const params: Record<string, unknown> = { days };
+        if (market) params.market = String(market).toUpperCase();
         const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/snapshots/daily`, {
-            params: { days },
+            params,
             headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
             timeout: 30000,
         });

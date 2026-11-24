@@ -644,14 +644,26 @@ async def capture_simulation_fund_snapshot(
 @router.get("/snapshots/daily", response_model=list[SimulationFundSnapshotResponse])
 async def list_simulation_fund_snapshots(
     days: int = Query(default=30, ge=1, le=3650),
+    market: str | None = Query(
+        default=None,
+        description="按市场取分市场日快照（CN/HK/US/FUTURES/CRYPTO/CUSTOM）；缺省为用户级合并口径",
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """查询当前用户的模拟盘日级资金快照历史。"""
-    snapshots = await SimulationFundSnapshotService.list_user_daily(
-        tenant_id=auth.tenant_id,
-        user_id=str(auth.user_id),
-        days=days,
-    )
+    """查询当前用户的模拟盘日级资金快照历史（可按市场取）。"""
+    if market:
+        snapshots = await SimulationFundSnapshotService.list_market_daily(
+            tenant_id=auth.tenant_id,
+            user_id=str(auth.user_id),
+            market=market,
+            days=days,
+        )
+    else:
+        snapshots = await SimulationFundSnapshotService.list_user_daily(
+            tenant_id=auth.tenant_id,
+            user_id=str(auth.user_id),
+            days=days,
+        )
     return [
         SimulationFundSnapshotResponse(
             snapshot_date=s.snapshot_date,

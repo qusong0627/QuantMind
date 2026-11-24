@@ -506,15 +506,15 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             const { realTradingService } = await import('../services/realTradingService');
             const [dailyReturn, tradeCount, positionRatio, account, ledgerDaily, tradeStats] = await Promise.all([
                 portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
-                tradingService.getTradeStats(resolvedUserId, '1w', mode),
-                portfolioService.getPositionDistribution(resolvedUserId, mode),
-                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode).catch(() => null),
+                tradingService.getTradeStats(resolvedUserId, '1w', mode, currentMarket),
+                portfolioService.getPositionDistribution(resolvedUserId, mode, currentMarket),
+                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode, currentMarket).catch(() => null),
                 isLive 
                     ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
-                    : realTradingService.getSimulationDailySnapshots(30).catch(() => []),
+                    : realTradingService.getSimulationDailySnapshots(30, currentMarket).catch(() => []),
                 isLive
                     ? Promise.resolve(null)
-                    : tradingService.getSimulationTradeStatsOverview().catch(() => null),
+                    : tradingService.getSimulationTradeStatsOverview(currentMarket).catch(() => null),
             ]);
 
             let normalizedPositionRatio: PositionDistribution[] = [];
@@ -651,7 +651,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar]);
+    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar, currentMarket]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {

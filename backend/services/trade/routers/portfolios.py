@@ -154,6 +154,9 @@ async def list_portfolios(
 )
 async def get_all_portfolios_distribution(
     trading_mode: str | None = Query(None, description="交易模式过滤: REAL/SIMULATION"),
+    market: str | None = Query(
+        None, description="按市场过滤持仓: CN/HK/US/FUTURES/CRYPTO/CUSTOM"
+    ),
     tenant_id: str = Depends(get_current_tenant_id),
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
@@ -163,6 +166,7 @@ async def get_all_portfolios_distribution(
         from sqlalchemy import and_, select
 
         from backend.services.trade_shared.portfolio.models import Portfolio, Position
+        from backend.shared.symbol_market import symbol_market_clause
 
         # 查询该用户所有持仓
         stmt = (
@@ -179,6 +183,8 @@ async def get_all_portfolios_distribution(
 
         if trading_mode:
             stmt = stmt.where(Portfolio.trading_mode == trading_mode.upper())
+        if market:
+            stmt = stmt.where(symbol_market_clause(Position.symbol, market))
 
         result = await db.execute(stmt)
         positions = result.scalars().all()

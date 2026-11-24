@@ -38,6 +38,7 @@ from backend.shared.simulation_account_keys import (
     resolve_active_identity,
 )
 from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.symbol_market import market_of_symbol
 
 logger = logging.getLogger(__name__)
 _SH_TZ = ZoneInfo("Asia/Shanghai")
@@ -804,6 +805,7 @@ def _notify(user_id: int, tenant_id: str, candidate: TriggerCandidate) -> None:
                 content=candidate.message or f"{candidate.rule_type} {candidate.symbol}",
                 type="trading",
                 level="warning",
+                market=market_of_symbol(candidate.symbol),
             )
         )
     except Exception:

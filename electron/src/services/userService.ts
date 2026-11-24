@@ -342,13 +342,14 @@ class UserService {
   // --- 通知中心 ---
 
   // 获取通知列表
-  async getNotifications(params?: { is_read?: boolean; limit?: number; offset?: number; days?: number }): Promise<ApiResponse<NotificationListResponse>> {
+  async getNotifications(params?: { is_read?: boolean; limit?: number; offset?: number; days?: number; market?: string }): Promise<ApiResponse<NotificationListResponse>> {
     try {
       const queryParams: Record<string, unknown> = {};
       if (params?.limit) queryParams['limit'] = params.limit;
       if (params?.offset) queryParams['offset'] = params.offset;
       if (params?.days) queryParams['days'] = params.days;
       if (params?.is_read !== undefined) queryParams['is_read'] = params.is_read;
+      if (params?.market) queryParams['market'] = String(params.market).toUpperCase();
 
       const raw = await apiClient.get<any>(API_ENDPOINTS.NOTIFICATIONS, queryParams);
       const ok = raw?.code === 200 && raw?.data && Array.isArray(raw?.data?.items);

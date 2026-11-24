@@ -33,6 +33,8 @@ export interface UseStrategiesOptions {
     autoRefresh?: boolean;
     refreshInterval?: number;
     enableRealtime?: boolean;
+    /** 按策略所属市场过滤（CN/HK/US/FUTURES/CRYPTO）；不传则展示全部 */
+    market?: string;
 }
 
 export interface UseStrategiesReturn {
@@ -59,7 +61,9 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
         autoRefresh = true,
         refreshInterval = DEFAULT_POLLING_INTERVAL,
         enableRealtime = true,
+        market,
     } = options;
+    const marketFilter = String(market || '').toUpperCase();
 
     const [strategies, setStrategies] = useState<Strategy[]>([]);
     const [stats, setStats] = useState<StrategyStats>({
@@ -187,6 +191,18 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
         };
     };
 
+    // 策略市场归属取自 parameters.market（历史/缺省按 CN）；GLOBAL 策略在每个市场都展示。
+    const filterByMarket = useCallback((list: Strategy[]): Strategy[] => {
+        if (!marketFilter) return list;
+        return list.filter((item) => {
+            const raw = String(
+                (item.parameters as Record<string, unknown> | undefined)?.market ?? '',
+            ).trim().toUpperCase();
+            const itemMarket = !raw || raw === 'A' || raw === 'A_SHARE' ? 'CN' : raw;
+            return itemMarket === marketFilter || itemMarket === 'GLOBAL';
+        });
+    }, [marketFilter]);
+
     const applyStrategiesSnapshot = useCallback((
         nextStrategies: Strategy[],
         nextIsSimulated: boolean,
@@ -221,8 +237,9 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
 
             if (isSuccessResponse(response) && Array.isArray(response.data)) {
                 const reconciledStrategies = await reconcileRuntimeStatus(response.data);
-                const nextIsSimulated = reconciledStrategies.some(s => s.name.includes('(模拟)'));
-                applyStrategiesSnapshot(reconciledStrategies, nextIsSimulated);
+                const filteredStrategies = filterByMarket(reconciledStrategies);
+                const nextIsSimulated = filteredStrategies.some(s => s.name.includes('(模拟)'));
+                applyStrategiesSnapshot(filteredStrategies, nextIsSimulated);
                 setIsStale(false);
                 setLastUpdatedAt(new Date().toISOString());
                 setError(null);
@@ -238,7 +255,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [strategies.length, reconcileRuntimeStatus, applyStrategiesSnapshot]);
+    }, [strategies.length, reconcileRuntimeStatus, applyStrategiesSnapshot, filterByMarket]);
 
     const refresh = useCallback(async () => {
         await fetchData({ silent: true });
@@ -354,7 +371,7 @@ export const useStrategies = (options: UseStrategiesOptions = {}): UseStrategies
 
     useEffect(() => {
         fetchData({ silent: false });
-    }, []);
+    }, [marketFilter]);
 
     useEffect(() => {
         if (!autoRefresh) {

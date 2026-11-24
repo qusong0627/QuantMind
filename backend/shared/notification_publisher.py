@@ -20,6 +20,7 @@ from backend.shared.notification_metrics import (
     notification_event_push_total,
     notification_publish_total,
 )
+from backend.shared.symbol_market import APP_MARKETS, normalize_market
 
 try:
     from backend.shared.database_pool import get_db
@@ -128,6 +129,14 @@ def _safe_level(value: str) -> str:
     return text_value if text_value in _ALLOWED_LEVELS else "info"
 
 
+def _safe_market(value: str | None) -> str | None:
+    """通知归属市场：缺省/非法值按全局（NULL）处理。"""
+    if not value:
+        return None
+    market = normalize_market(value)
+    return market if market in APP_MARKETS else None
+
+
 def _looks_like_missing_table_error(error: ProgrammingError) -> bool:
     msg = str(error).lower()
     # 必须同时包含 "notifications" 和明确的表不存在标识
@@ -157,6 +166,7 @@ def publish_notification(
     level: str = "info",
     action_url: str | None = None,
     expire_days: int | None = None,
+    market: str | None = None,
 ) -> bool:
     """
     同步发布通知。失败时返回 False，不抛出异常阻断主业务。
@@ -187,14 +197,15 @@ def publish_notification(
         "level": _safe_level(level),
         "action_url": str(action_url).strip()[:512] if action_url else None,
         "expires_at": expires_at,
+        "market": _safe_market(market),
     }
 
     sql = text("""
         INSERT INTO notifications (
-            user_id, tenant_id, title, content, notification_type, level, action_url, expires_at
+            user_id, tenant_id, title, content, notification_type, level, action_url, expires_at, market
         )
         VALUES (
-            :user_id, :tenant_id, :title, :content, :type, :level, :action_url, :expires_at
+            :user_id, :tenant_id, :title, :content, :type, :level, :action_url, :expires_at, :market
         )
         RETURNING id, created_at
         """)
@@ -223,6 +234,7 @@ def publish_notification(
                 "type": params["type"],
                 "level": params["level"],
                 "action_url": params["action_url"],
+                "market": params["market"],
                 "created_at": (
                     created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or now.isoformat())
                 ),

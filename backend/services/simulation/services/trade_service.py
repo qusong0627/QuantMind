@@ -9,6 +9,7 @@ from sqlalchemy import String, and_, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.trade import SimTrade
+from backend.shared.symbol_market import symbol_market_clause
 
 
 class SimTradeService:
@@ -119,12 +120,19 @@ class SimTradeService:
                 pass
         return trades
 
-    def _stats_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None) -> str:
+    def _stats_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, market: str | None = None) -> str:
         port = str(portfolio_id) if portfolio_id is not None else "all"
-        return f"sim_trade:stats:{tenant_id}:{user_id}:{port}"
+        mkt = str(market or "all").upper()
+        return f"sim_trade:stats:{tenant_id}:{user_id}:{port}:{mkt}"
 
-    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None) -> dict:
-        cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id)
+    async def get_stats(
+        self,
+        tenant_id: str,
+        user_id: int,
+        portfolio_id: int | None = None,
+        market: str | None = None,
+    ) -> dict:
+        cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id, market)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
@@ -137,6 +145,9 @@ class SimTradeService:
         conditions = [SimTrade.tenant_id == tenant_id, cast(SimTrade.user_id, String) == str(user_id)]
         if portfolio_id is not None:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
+        if market:
+            # 首页智能图表跟随市场：按标的后缀过滤该市场成交/已实现盈亏
+            conditions.append(symbol_market_clause(SimTrade.symbol, market))
 
         summary_stmt = select(
             func.count(SimTrade.id).label("total_trades"),

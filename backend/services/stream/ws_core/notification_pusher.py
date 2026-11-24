@@ -125,6 +125,7 @@ class NotificationPusher:
                 "type": str(raw.get("type") or "system"),
                 "level": str(raw.get("level") or "info"),
                 "action_url": str(raw.get("action_url") or "") or None,
+                "market": str(raw.get("market") or "") or None,
                 "is_read": False,
                 "created_at": str(raw.get("created_at") or ""),
             },

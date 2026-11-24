@@ -31,6 +31,7 @@ class NotificationResponse(BaseModel):
     read_at: datetime | None = None
     created_at: datetime
     expires_at: datetime | None = None
+    market: str | None = None
 
     @field_validator("is_read", mode="before")
     @classmethod
@@ -60,6 +61,8 @@ class SystemAnnouncementRequest(BaseModel):
     action_url: str | None = None
     user_id: str
     tenant_id: str = "default"
+    # 缺省全局公告；指定市场仅该市场可见
+    market: str | None = None
 
 
 class ClearNotificationsRequest(BaseModel):
@@ -72,6 +75,10 @@ async def list_notifications(
     days: int | None = Query(None, ge=1, le=30),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    market: str | None = Query(
+        None,
+        description="按市场取数（含全局通知）：CN/HK/US/FUTURES/CRYPTO/CUSTOM",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -86,6 +93,7 @@ async def list_notifications(
             days=days,
             limit=limit,
             offset=offset,
+            market=market,
         )
         items = [NotificationResponse.model_validate(n) for n in notifications]
         return NotificationListEnvelope(
@@ -180,6 +188,7 @@ async def create_system_announcement(
             type=payload.type,
             level=payload.level,
             action_url=payload.action_url,
+            market=payload.market,
         )
 
     return {"code": 200, "message": "公告已发布", "data": {"id": created.id}}

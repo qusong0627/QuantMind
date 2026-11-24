@@ -1218,6 +1218,30 @@ CREATE TABLE IF NOT EXISTS simulation_fund_snapshots (
     UNIQUE (tenant_id, user_id, snapshot_date)
 );
 
+-- 44.1 SIMULATION_MARKET_FUND_SNAPSHOTS（分市场模拟资金日快照）
+--   首页智能图表按市场展示每日收益率曲线。原 simulation_fund_snapshots 是
+--   跨市场合并的用户级口径（基线/EOD 都依赖它），不能直接加市场维度；
+--   本表只由周期采集按 Redis 分市场账户额外写入，不影响原表语义。
+CREATE TABLE IF NOT EXISTS simulation_market_fund_snapshots (
+    id                  SERIAL PRIMARY KEY,
+    tenant_id           VARCHAR(64) NOT NULL DEFAULT 'default',
+    user_id             VARCHAR(64) NOT NULL,
+    market              VARCHAR(16) NOT NULL DEFAULT 'CN',
+    snapshot_date       DATE NOT NULL,
+    total_asset         FLOAT NOT NULL DEFAULT 0,
+    available_balance   FLOAT NOT NULL DEFAULT 0,
+    frozen_balance      FLOAT NOT NULL DEFAULT 0,
+    market_value        FLOAT NOT NULL DEFAULT 0,
+    initial_capital     FLOAT NOT NULL DEFAULT 0,
+    total_pnl           FLOAT NOT NULL DEFAULT 0,
+    today_pnl           FLOAT NOT NULL DEFAULT 0,
+    source              VARCHAR(64) NOT NULL DEFAULT 'sim',
+    updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, user_id, market, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_sim_market_fund_owner_date
+    ON simulation_market_fund_snapshots (tenant_id, user_id, market, snapshot_date DESC);
+
 -- ========================
 -- 45. KLINES
 -- ========================
@@ -1681,13 +1705,18 @@ CREATE TABLE IF NOT EXISTS notifications (
     is_read             BOOLEAN DEFAULT FALSE,
     read_at             TIMESTAMPTZ,
     created_at          TIMESTAMPTZ DEFAULT NOW(),
-    expires_at          TIMESTAMPTZ
+    expires_at          TIMESTAMPTZ,
+    -- 通知归属市场：NULL = 全局通知（所有市场都展示），CN/HK/US/FUTURES/CRYPTO/CUSTOM = 仅该市场展示
+    market              VARCHAR(16)
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications (user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_tenant_id ON notifications (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications (notification_type);
 CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications (is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_market ON notifications (market);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_market_created
+    ON notifications (tenant_id, user_id, market, created_at DESC);
 
 -- 59.8 PAYMENT_TRANSACTIONS
 CREATE TABLE IF NOT EXISTS payment_transactions (
@@ -2665,6 +2694,14 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'merge 66.6 sim_trades skipped';
 END $$;
+
+-- ---- 66.7 多市场仪表盘：notifications.market ----
+--     首页信息通知按市场取数：NULL = 全局通知（所有市场可见），
+--     具体市场 = 仅该市场可见。存量行保持 NULL，等同于全局展示。
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS market VARCHAR(16);
+CREATE INDEX IF NOT EXISTS idx_notifications_market ON notifications (market);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_user_market_created
+    ON notifications (tenant_id, user_id, market, created_at DESC);
 
 -- ========================
 -- 67. QM_USER_FACTOR_GENERATIONS 用户因子训练数据集自动发布（generation + active 指针）

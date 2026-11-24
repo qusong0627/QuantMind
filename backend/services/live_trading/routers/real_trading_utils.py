@@ -773,12 +773,14 @@ def _schedule_user_notification(
     level: str = "info",
     action_url: str | None = None,
     check_preference: bool = False,
+    market: str | None = None,
 ) -> None:
     """
     调度用户通知（异步后台任务）
 
     Args:
         check_preference: 是否检查用户通知偏好（默认不检查，确保关键通知送达）
+        market: 通知归属市场（缺省全局）
     """
 
     async def _runner() -> None:
@@ -817,6 +819,7 @@ def _schedule_user_notification(
             type=type,
             level=level,
             action_url=action_url,
+            market=market,
         )
 
     task = asyncio.create_task(_runner())

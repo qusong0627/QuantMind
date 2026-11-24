@@ -15,6 +15,7 @@ from backend.shared.notification_metrics import (
     notification_unread_query_duration_seconds,
     timer,
 )
+from backend.shared.symbol_market import normalize_market
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class NotificationService:
         type: str = "system",
         level: str = "info",
         action_url: str | None = None,
+        market: str | None = None,
     ) -> Notification:
         """创建通知"""
         await self._ensure_notification_indexes()
@@ -45,6 +47,7 @@ class NotificationService:
             type=type,
             level=level,
             action_url=action_url,
+            market=normalize_market(market) if market else None,
         )
         self.session.add(notification)
         await self.session.commit()
@@ -58,8 +61,9 @@ class NotificationService:
         days: int | None = None,
         limit: int = 50,
         offset: int = 0,
+        market: str | None = None,
     ) -> tuple[list[Notification], int, int, dict[str, int]]:
-        """获取用户通知"""
+        """获取用户通知（按市场取数时包含全局通知）"""
         active_filter = (Notification.expires_at.is_(None)) | (Notification.expires_at > func.now())
         filters = [
             Notification.user_id == user_id,
@@ -76,6 +80,13 @@ class NotificationService:
             unread_filter,
             active_filter,
         ]
+        if market:
+            market_filter = or_(
+                Notification.market.is_(None),
+                Notification.market == normalize_market(market),
+            )
+            filters.append(market_filter)
+            unread_filters.append(market_filter)
 
         if days is not None:
             start_at = datetime.now(timezone.utc) - timedelta(days=days)

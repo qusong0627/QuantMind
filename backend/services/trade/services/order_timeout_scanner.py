@@ -22,6 +22,7 @@ from backend.services.trade_shared.models.enums import OrderStatus
 from backend.services.trade_shared.models.order import Order, TradingMode
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.notification_publisher import publish_notification_async
+from backend.shared.symbol_market import market_of_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ async def _scan_once() -> int:
                         type="trading",
                         level="warning",
                         action_url="/trading",
+                        market=market_of_symbol(order.symbol),
                     )
                 except Exception as notify_exc:
                     logger.warning("notify failed for expired order %s: %s", order.order_id, notify_exc)
@@ -165,6 +167,7 @@ async def _scan_bridge_ack_timeout_once() -> int:
                         type="trading",
                         level="warning",
                         action_url="/trading",
+                        market=market_of_symbol(symbol or order.symbol),
                     )
                 except Exception as notify_exc:
                     logger.warning("notify failed for bridge timeout order %s: %s", order.order_id, notify_exc)

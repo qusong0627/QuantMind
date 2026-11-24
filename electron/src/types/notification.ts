@@ -75,6 +75,8 @@ export interface UseNotificationsOptions {
   days?: number;
   autoRefresh?: boolean;
   refreshInterval?: number;
+  /** 按市场取数（含全局通知）；不传则不过滤 */
+  market?: string;
 }
 
 export interface UseNotificationsReturn {

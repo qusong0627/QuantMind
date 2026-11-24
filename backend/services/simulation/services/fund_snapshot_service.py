@@ -20,7 +20,13 @@ from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.models.fund_snapshot import (
     SimulationFundSnapshot,
 )
+from backend.services.simulation.models.market_fund_snapshot import (
+    SimulationMarketFundSnapshot,
+)
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.simulation_account_keys import (
+    normalize_market as normalize_account_market,
+)
 from backend.shared.simulation_account_keys import (
     parse_account_key as parse_canonical_account_key,
 )
@@ -311,29 +317,19 @@ class SimulationFundSnapshotService:
         keys = list(redis.client.scan_iter(match="simulation:account:*", count=500))
         # 同一用户跨市场账户（CN/HK/US/...）合并为一条用户级快照：
         # 资产字段累加，盈亏在合并后的总资产上计算（与台账口径一致）。
+        # 另外按 (tenant, user, market) 单独聚一份，写分市场日快照供智能图表取数。
         grouped: dict[tuple[str, str], dict[str, Decimal]] = {}
-        for key in keys:
-            parsed = _parse_account_key(str(key))
-            if not parsed:
-                continue
-            tenant_id, user_id = parsed
-            raw = redis.client.get(key)
-            if not raw:
-                continue
-            try:
-                account = json.loads(raw)
-            except Exception:
-                continue
+        market_grouped: dict[tuple[str, str, str], dict[str, Decimal]] = {}
 
-            bucket = grouped.setdefault(
-                (tenant_id, user_id),
-                {
-                    "total_asset": Decimal("0"),
-                    "available_balance": Decimal("0"),
-                    "frozen_balance": Decimal("0"),
-                    "market_value": Decimal("0"),
-                },
-            )
+        def _empty_bucket() -> dict[str, Decimal]:
+            return {
+                "total_asset": Decimal("0"),
+                "available_balance": Decimal("0"),
+                "frozen_balance": Decimal("0"),
+                "market_value": Decimal("0"),
+            }
+
+        def _add_account(bucket: dict[str, Decimal], account: dict) -> None:
             bucket["total_asset"] += _to_decimal(account.get("total_asset"))
             bucket["available_balance"] += _to_decimal(
                 account.get("cash") or account.get("available_balance")
@@ -341,6 +337,32 @@ class SimulationFundSnapshotService:
             bucket["frozen_balance"] += _to_decimal(account.get("frozen_balance"))
             bucket["market_value"] += _to_decimal(
                 account.get("market_value") or account.get("long_market_value")
+            )
+
+        for key in keys:
+            parsed = parse_canonical_account_key(str(key))
+            if not parsed:
+                continue
+            tenant_id, user_id, market = parsed
+            market = normalize_account_market(market)
+            raw = redis.client.get(key)
+            if not raw:
+                continue
+            try:
+                account = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(account, dict):
+                continue
+
+            _add_account(
+                grouped.setdefault((tenant_id, user_id), _empty_bucket()), account
+            )
+            _add_account(
+                market_grouped.setdefault(
+                    (tenant_id, user_id, market), _empty_bucket()
+                ),
+                account,
             )
 
         if not grouped:
@@ -414,8 +436,133 @@ class SimulationFundSnapshotService:
             seen_users = {(str(t), str(u)) for (t, u) in grouped}
             for tenant_id, user_id in seen_users:
                 await cls._backfill_missing_account_daily(session, tenant_id, user_id)
+            # 分市场日快照：只服务智能图表按市场取数，与上面的用户级基线互不影响。
+            await cls._upsert_market_snapshots(
+                session,
+                market_grouped,
+                snap_date,
+                redis=redis,
+            )
 
         return SnapshotUpsertResult(upserted_rows=upserted, scanned_accounts=len(keys))
+
+    @classmethod
+    async def _upsert_market_snapshots(
+        cls,
+        session,
+        market_grouped: dict[tuple[str, str, str], dict[str, Decimal]],
+        snap_date,
+        *,
+        redis: RedisClient,
+    ) -> None:
+        """按市场写 simulation_market_fund_snapshots（每个市场账户一行）。"""
+        if not market_grouped:
+            return
+        for (tenant_id, user_id, market), bucket in market_grouped.items():
+            initial_capital = cls._read_settings_initial_cash(redis, tenant_id, user_id)
+            if initial_capital == 0:
+                initial_capital = await cls._read_ledger_initial_equity(
+                    tenant_id, user_id
+                )
+            if initial_capital == 0:
+                initial_capital = bucket["total_asset"]
+            day_open = await cls._market_day_open_equity(
+                session,
+                tenant_id,
+                user_id,
+                market,
+                snap_date,
+            )
+            total_asset = bucket["total_asset"]
+            row = {
+                "tenant_id": tenant_id,
+                "user_id": str(user_id),
+                "market": market,
+                "snapshot_date": snap_date,
+                "total_asset": total_asset,
+                "available_balance": bucket["available_balance"],
+                "frozen_balance": bucket["frozen_balance"],
+                "market_value": bucket["market_value"],
+                "initial_capital": initial_capital,
+                "total_pnl": total_asset - initial_capital,
+                # 无历史基线时按 0 当日涨跌，避免把累计收益误画成单日收益
+                "today_pnl": (
+                    total_asset - day_open if day_open is not None else Decimal("0")
+                ),
+                "source": PERIODIC_FUND_SOURCE,
+            }
+            stmt = (
+                pg_insert(SimulationMarketFundSnapshot)
+                .values(**row)
+                .on_conflict_do_update(
+                    index_elements=[
+                        "tenant_id",
+                        "user_id",
+                        "market",
+                        "snapshot_date",
+                    ],
+                    set_={
+                        "total_asset": row["total_asset"],
+                        "available_balance": row["available_balance"],
+                        "frozen_balance": row["frozen_balance"],
+                        "market_value": row["market_value"],
+                        "initial_capital": row["initial_capital"],
+                        "total_pnl": row["total_pnl"],
+                        "today_pnl": row["today_pnl"],
+                        "source": row["source"],
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
+            )
+            await session.execute(stmt)
+
+    @staticmethod
+    async def _market_day_open_equity(
+        session,
+        tenant_id: str,
+        user_id: str,
+        market: str,
+        snap_date,
+    ) -> Decimal | None:
+        """该市场上一交易日总资产作为日初权益。
+
+        无分市场历史时，CN 回退用户级历史快照（口径改造前只有 A 股在用）；
+        仍无历史则返回 None，由调用方把当日涨跌记为 0。
+        """
+        try:
+            row = (
+                await session.execute(
+                    select(SimulationMarketFundSnapshot.total_asset)
+                    .where(
+                        SimulationMarketFundSnapshot.tenant_id == tenant_id,
+                        SimulationMarketFundSnapshot.user_id == str(user_id),
+                        SimulationMarketFundSnapshot.market == market,
+                        SimulationMarketFundSnapshot.snapshot_date < snap_date,
+                    )
+                    .order_by(SimulationMarketFundSnapshot.snapshot_date.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                return _to_decimal(row)
+            if market == "CN":
+                legacy = (
+                    await session.execute(
+                        select(SimulationFundSnapshot.total_asset)
+                        .where(
+                            SimulationFundSnapshot.tenant_id == tenant_id,
+                            SimulationFundSnapshot.user_id == str(user_id),
+                            SimulationFundSnapshot.snapshot_date < snap_date,
+                        )
+                        .order_by(SimulationFundSnapshot.snapshot_date.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if legacy is not None:
+                    return _to_decimal(legacy)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("market day open lookup failed: %s", exc)
+        return None
 
     @staticmethod
     async def _backfill_missing_account_daily(
@@ -539,6 +686,63 @@ class SimulationFundSnapshotService:
             )
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    @staticmethod
+    async def list_market_daily(
+        tenant_id: str,
+        user_id: str,
+        market: str = "CN",
+        days: int = 30,
+    ) -> list[SimulationFundSnapshot | SimulationMarketFundSnapshot]:
+        """分市场日快照（智能图表）。
+
+        CN 额外用历史用户级快照补齐本表上线前的日期（口径改造前只有 A 股主要
+        在用，用用户级快照兜底保持曲线连续）；已有分市场行的日期优先本表。
+        """
+        market_norm = normalize_account_market(market)
+        limit = max(1, min(days, 3650))
+        async with get_session(read_only=True) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(SimulationMarketFundSnapshot)
+                        .where(
+                            SimulationMarketFundSnapshot.tenant_id == tenant_id,
+                            SimulationMarketFundSnapshot.user_id == user_id,
+                            SimulationMarketFundSnapshot.market == market_norm,
+                        )
+                        .order_by(SimulationMarketFundSnapshot.snapshot_date.desc())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        merged: list[SimulationFundSnapshot | SimulationMarketFundSnapshot] = list(rows)
+        if market_norm == "CN" and len(merged) < limit:
+            existing_dates = {row.snapshot_date for row in merged}
+            async with get_session(read_only=True) as session:
+                legacy_rows = (
+                    (
+                        await session.execute(
+                            select(SimulationFundSnapshot)
+                            .where(
+                                SimulationFundSnapshot.tenant_id == tenant_id,
+                                SimulationFundSnapshot.user_id == user_id,
+                            )
+                            .order_by(SimulationFundSnapshot.snapshot_date.desc())
+                            .limit(limit)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            for row in legacy_rows:
+                if row.snapshot_date not in existing_dates:
+                    merged.append(row)
+                    existing_dates.add(row.snapshot_date)
+        merged.sort(key=lambda row: row.snapshot_date, reverse=True)
+        return merged[:limit]
 
 
 class SimulationFundSnapshotWorker:
