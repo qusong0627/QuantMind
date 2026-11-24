@@ -40,10 +40,16 @@ export interface SignalEvalTopN {
   excess: number | null;
   excess_t: number | null;
   market_return: number | null;
-  excess_zz500?: number | null;
+  excess_hs300?: number | null;
+  excess_sse?: number | null;
+  excess_szse?: number | null;
   excess_zz1000?: number | null;
-  zz500_return?: number | null;
+  excess_zz500?: number | null;
+  hs300_return?: number | null;
+  sse_return?: number | null;
+  szse_return?: number | null;
   zz1000_return?: number | null;
+  zz500_return?: number | null;
   avg_names: number | null;
   capacity_p5: number | null;
   capacity_p10: number | null;
@@ -126,6 +132,18 @@ export interface SignalEvalReport {
     benchmarks?: Record<string, Array<{ date: string; nav: number }>>;
   };
   topn: SignalEvalTopN[];
+  execution?: {
+    entry: string;
+    exit: string;
+    cost_bps_per_side: number;
+    cost_note: string;
+    limit_up_entry_excluded: boolean;
+    limit_down_exit_extended: boolean;
+    st_pit_excluded: boolean;
+    adv_floor_yuan: number;
+    missing_price_skipped: boolean;
+    benchmark_basis: string;
+  };
   verdict: SignalEvalVerdict;
   admission?: SignalEvalAdmission;
 }

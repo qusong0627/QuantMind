@@ -214,8 +214,11 @@ docker exec -w /app quantmind python3 /app/backend/scripts/eval/ff_external_chec
   策略绑定三个入口在 `red/unknown` 时返回 **409**，需前端二次确认并带 `force=true` 重试
   （`utils/modelAdmission.tsx`），`yellow` 放行但把未过项带回。
 - **统计口径修正**：HAC lag 随持有期（`horizon−1`，T+20 不再用 lag4）；原始/中性化 IC
-  强制同一批有效行；新增覆盖率（低于 50% 的交易日）、中证 500/1000 基准超额、
-  独立周期数（`signal_days//horizon`）。
+  强制同一批有效行；新增覆盖率（低于 50% 的交易日）、**沪深300/上证/深证成指/中证1000
+  四大指数超额（指数与组合统一按 open→open 对齐）**、独立周期数（`signal_days//horizon`）。
+- **严格实盘口径**：T+1 开盘买 → 持有期末开盘卖；开盘涨停买不进剔除、跌停卖不出顺延、
+  PIT ST 剔除、停牌/缺价跳过、20 日 ADV 门槛、双边成本（佣金/印花/滑点）；容量按
+  5% 参与率与最不流动持仓估算。报告与面板均返回 `execution` 元数据，表格底部展示。
 - **历史与日更**：每次计算追加 `ui_63d.history.jsonl`（同一窗口只留最新），面板画
   滚动 3 个月指标趋势；交易日 **16:50** 的 Celery 任务
   `engine.tasks.model_signal_eval_refresh` 对默认模型 + 策略绑定模型自动体检，

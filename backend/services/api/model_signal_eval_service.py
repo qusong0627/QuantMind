@@ -52,15 +52,21 @@ from backend.shared.stock_utils import StockCodeUtil
 
 log = logging.getLogger(__name__)
 
-EVAL_VERSION = 2  # 改口径必须 +1：指纹含它，旧缓存会因此失效并自动重算
+EVAL_VERSION = 3  # 改口径必须 +1：指纹含它，旧缓存会因此失效并自动重算
 WINDOW_TRADING_DAYS = 63  # 约 3 个自然月
 TOPN_LIST = (20, 50, 100)
 DEFAULT_HORIZON = 5
 DEFAULT_MIN_ADV = 2.0e7
 DEFAULT_COST_BPS = 15.0
 LOCK_STALE_SECONDS = 15 * 60
-# QuantDB 日频里有中证 500 / 中证 1000 指数收盘；HS300 不在该快照，暂不引用。
-INDEX_SYMBOLS = {"zz500": "000905.SZ", "zz1000": "000852.SZ"}
+# 指数统一读 1_kline_data/index_daily（open/close 全有），基准超额按 open→open 对齐
+# TopN 的 T+1 开盘买入口径；不用 daily_forward 里的指数（只有部分、且只有 close）。
+INDEX_SYMBOLS = {
+    "hs300": "399300.SZ",  # 沪深300
+    "sse": "000001.SH",  # 上证指数
+    "szse": "399001.SZ",  # 深证成指
+    "zz1000": "000852.SH",  # 中证1000
+}
 HISTORY_LIMIT = 120
 
 
@@ -261,18 +267,23 @@ def equal_weight_market_returns(symbols: list[str], start: str, end: str) -> pd.
 
 
 def index_daily_returns(start: str, end: str) -> dict[str, pd.Series]:
-    """中证 500 / 中证 1000 日收益（daily_forward 收盘，按指数自身交易日）。"""
+    """四大指数日收益（``index_daily`` 开盘价 open→open）。
+
+    与 TopN 的 T+1 开盘买入、逐日 open→open 口径严格对齐；不用 close→close，
+    避免「组合开盘价、指数收盘价」的时点错配。中证500/中证1000 的代码在
+    ``index_daily`` 里是 ``.SH``（不是 daily_forward 里的 ``.SZ``）。
+    """
     import duckdb
 
-    fwd = resolve_quantdb_subdir("1_kline_data", "daily_forward")
-    glob_pat = str(fwd / "dt=*" / "*.parquet").replace("\\", "/")
+    idx_dir = resolve_quantdb_subdir("1_kline_data", "index_daily")
+    glob_pat = str(idx_dir / "dt=*" / "*.parquet").replace("\\", "/")
     lo = (pd.Timestamp(start) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     hi = (pd.Timestamp(end) + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     con = duckdb.connect()
     try:
         px = con.execute(
             f"""
-            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, close
+            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, open
             FROM read_parquet('{glob_pat}', hive_partitioning=1)
             WHERE time >= DATE '{lo}' AND time <= DATE '{hi}'
               AND symbol IN ({",".join(f"'{s}'" for s in INDEX_SYMBOLS.values())})
@@ -286,9 +297,10 @@ def index_daily_returns(start: str, end: str) -> dict[str, pd.Series]:
         if rows.empty:
             continue
         s = pd.Series(
-            rows["close"].to_numpy(dtype=float),
+            rows["open"].to_numpy(dtype=float),
             index=pd.to_datetime(rows["date_key"], format="%Y%m%d"),
         )
+        s = s.where(s > 0)
         ret = s.pct_change(fill_method=None).dropna()
         ret = ret[ret.index >= pd.Timestamp(start)]
         out[name] = ret
@@ -736,6 +748,18 @@ def compute_report(
         "series": {"weekly_ic": _weekly_ic(ic_daily), "benchmarks": bench_series},
         "topn": topn,
         "verdict": verdict,
+        "execution": {
+            "entry": "T+1 开盘",
+            "exit": f"T+1+{int(horizon)} 开盘",
+            "cost_bps_per_side": float(cost_bps),
+            "cost_note": "双边成本含佣金/印花税/滑点（按单边 bps 均摊）",
+            "limit_up_entry_excluded": True,
+            "limit_down_exit_extended": True,
+            "st_pit_excluded": not include_st,
+            "adv_floor_yuan": float(min_adv),
+            "missing_price_skipped": True,
+            "benchmark_basis": "open→open（与组合同一时点）",
+        },
     }
     report["admission"] = admission_from_report(report)
     return report

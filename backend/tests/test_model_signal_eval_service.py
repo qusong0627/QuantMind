@@ -56,6 +56,24 @@ def test_daily_stats_returns_and_excess():
     assert stats["days"] == 10
 
 
+def test_daily_stats_computes_four_index_excesses():
+    dates = pd.date_range("2026-08-01", periods=10, freq="B")
+    daily = pd.Series([0.01] * 10, index=dates)
+    market = pd.Series([0.005] * 10, index=dates)
+    benchmarks = {
+        "hs300": pd.Series([0.002] * 10, index=dates),
+        "sse": pd.Series([0.003] * 10, index=dates),
+        "szse": pd.Series([0.004] * 10, index=dates),
+        "zz1000": pd.Series([0.006] * 10, index=dates),
+    }
+    stats = _daily_stats(daily, market, benchmarks)
+    for name in benchmarks:
+        assert f"excess_{name}" in stats
+        assert f"{name}_return" in stats
+        assert stats[f"excess_{name}"] > 0
+    assert stats["excess_zz1000"] < stats["excess_hs300"]
+
+
 def test_build_verdict_ranking_ok_but_long_fails():
     raw = {"mean": 0.10, "hac_t": 3.0}
     neutral = {"mean": 0.08, "hac_t": 3.0}

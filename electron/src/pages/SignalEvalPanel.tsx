@@ -15,12 +15,12 @@ import {
   YAxis,
 } from 'recharts';
 import { modelTrainingService } from '../services/modelTrainingService';
+import { SignalEvalTopNTable } from './SignalEvalTopNTable';
 import type {
   SignalEvalAdmission,
   SignalEvalHistoryRow,
   SignalEvalReport,
   SignalEvalState,
-  SignalEvalTopN,
 } from '../services/modelSignalEvalTypes';
 
 /** 测试集实盘力：滚动 3 个月的截面排序 + TopN 长多体检。
@@ -66,12 +66,6 @@ function fmtPct(value: number | null | undefined, digits = 2): string {
 function fmtNum(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   return value.toFixed(digits);
-}
-
-function fmtWan(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  if (Math.abs(value) >= 1e8) return `${(value / 1e8).toFixed(2)} 亿`;
-  return `${Math.round(value / 1e4)} 万`;
 }
 
 /** A 股习惯：红涨绿跌（收益类数字专用；通过/失败徽章仍用绿/红语义）。 */
@@ -189,46 +183,6 @@ const PendingState: React.FC<{
     </div>
   );
 };
-
-const TopNTable: React.FC<{ rows: SignalEvalTopN[] }> = ({ rows }) => (
-  <div className="overflow-x-auto">
-    <table className="w-full min-w-[620px] border-collapse text-[10px]">
-      <thead>
-        <tr className="border-b border-slate-100 text-[9px] font-bold tracking-wide text-slate-400">
-          <th className="py-1.5 pr-2 text-left font-bold">组合</th>
-          <th className="px-2 py-1.5 text-right font-bold">近 3 月</th>
-          <th className="px-2 py-1.5 text-right font-bold">超额 vs 打分池</th>
-          <th className="px-2 py-1.5 text-right font-bold">超额 vs 中证1000</th>
-          <th className="px-2 py-1.5 text-right font-bold">最大回撤</th>
-          <th className="px-2 py-1.5 text-right font-bold">夏普</th>
-          <th className="px-2 py-1.5 text-right font-bold">平均持仓</th>
-          <th className="py-1.5 pl-2 text-right font-bold">容量(5%)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.n} className="border-b border-slate-50 last:border-0">
-            <td className="py-2 pr-2 font-mono text-[11px] font-black text-slate-700">Top{row.n}</td>
-            <td className={clsx('px-2 py-2 text-right font-mono font-black tabular-nums', returnTone(row.total_return))}>
-              {fmtPct(row.total_return)}
-            </td>
-            <td className="px-2 py-2 text-right font-mono tabular-nums">
-              <span className={returnTone(row.excess)}>{fmtPct(row.excess)}</span>
-              <span className="ml-1 text-[8px] text-slate-300">t {fmtNum(row.excess_t, 1)}</span>
-            </td>
-            <td className={clsx('px-2 py-2 text-right font-mono tabular-nums', returnTone(row.excess_zz1000 ?? null))}>
-              {fmtPct(row.excess_zz1000 ?? null)}
-            </td>
-            <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-500">{fmtPct(row.mdd)}</td>
-            <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-500">{fmtNum(row.sharpe)}</td>
-            <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-500">{fmtNum(row.avg_names, 1)}</td>
-            <td className="py-2 pl-2 text-right font-mono tabular-nums text-slate-500">{fmtWan(row.capacity_p5)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
-);
 
 export interface SignalEvalPanelProps {
   modelId: string;
@@ -624,13 +578,38 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
             </div>
 
             <div>
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-[10px] font-black text-slate-600">TopN 长多（可执行口径）</span>
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-black text-slate-600">
+                  TopN 长多（可执行口径）
+                  <span
+                    className="rounded bg-emerald-50 px-1.5 py-0.5 text-[8px] font-black text-emerald-700"
+                    title={
+                      report.execution
+                        ? [
+                            `${report.execution.entry}买 → ${report.execution.exit}卖`,
+                            `${report.execution.cost_bps_per_side}bp/边（${report.execution.cost_note}）`,
+                            report.execution.limit_up_entry_excluded ? '开盘涨停买不进剔除' : '',
+                            report.execution.limit_down_exit_extended ? '跌停卖不出顺延' : '',
+                            report.execution.st_pit_excluded ? 'PIT ST 剔除' : '含 ST',
+                            report.execution.adv_floor_yuan
+                              ? `20日ADV≥${(report.execution.adv_floor_yuan / 1e4).toFixed(0)}万`
+                              : '',
+                            report.execution.missing_price_skipped ? '停牌/缺价跳过' : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : 'T+1 开盘买、持有期末开盘卖、涨跌停/ST/流动性过滤'
+                    }
+                  >
+                    严格实盘
+                  </span>
+                </span>
                 <span className="text-[9px] text-slate-400">
-                  T+1 开盘 · 持 {report.window.horizon} 日 · 双边 15bp · 剔 ST/开盘涨停
+                  T+1 开盘 · 持 {report.window.horizon} 日 ·{' '}
+                  {report.execution?.cost_bps_per_side ?? 15}bp/边 · 基准 open→open
                 </span>
               </div>
-              <TopNTable rows={report.topn} />
+              <SignalEvalTopNTable rows={report.topn} execution={report.execution} />
             </div>
 
             <div>

@@ -74,6 +74,9 @@ function sampleReport(): SignalEvalReport {
         sharpe: -0.5,
         excess: -0.10137,
         excess_t: -0.62,
+        excess_hs300: -0.12,
+        excess_sse: -0.11,
+        excess_szse: -0.1,
         excess_zz1000: -0.08,
         market_return: -0.2,
         avg_names: 19.25,
@@ -147,6 +150,13 @@ describe('SignalEvalPanel 测试集实盘力', () => {
     expect(screen.getAllByText('-31.02%').length).toBeGreaterThan(0);
     expect(screen.getAllByText('-10.14%').length).toBeGreaterThan(0);
     expect(screen.getByText('-8.00%')).toBeInTheDocument();
+    expect(screen.getByText('沪深300')).toBeInTheDocument();
+    expect(screen.getByText('上证')).toBeInTheDocument();
+    expect(screen.getByText('深证')).toBeInTheDocument();
+    expect(screen.getByText('中证1000')).toBeInTheDocument();
+    expect(screen.getByText('-12.00%')).toBeInTheDocument();
+    expect(screen.getByText('-11.00%')).toBeInTheDocument();
+    expect(screen.getByText('-10.00%')).toBeInTheDocument();
     expect(screen.getByText(/长多没跑赢打分池/)).toBeInTheDocument();
     expect(screen.getByText('评估黄色预警')).toBeInTheDocument();
     expect(screen.getByText(/历史不足（当前 0 次）/)).toBeInTheDocument();

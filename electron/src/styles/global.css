@@ -932,6 +932,34 @@ html.platform-win32.os-win10 .module-grid-container {
   background: #94a3b8;
 }
 
+/* 模型实盘力 TopN 表：表体本身隐藏横向滚动条，底部单独留一条可见滚动条 */
+.table-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.table-scroll-hidden::-webkit-scrollbar {
+  display: none;
+}
+.table-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+}
+.table-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+.table-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 9999px;
+}
+.table-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+  border: 2px solid #f1f5f9;
+}
+.table-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
 /* ǿ��С�ֺ��ı�ʹ�ô�Ҫ����ջ������������ */
 .text-xs, 
 .text-\[11px\], 
