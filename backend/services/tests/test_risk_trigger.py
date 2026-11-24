@@ -200,8 +200,14 @@ class _FakeRedis:
     def get(self, key):
         return self.store.get(key)
 
-    def set(self, key, value, ex=None):
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.store:
+            return None
         self.store[key] = value
+        return True
+
+    def delete(self, key):
+        self.store.pop(key, None)
 
     def scan_iter(self, match, count=200):
         return [key for key in self.store if str(key).startswith(match.rstrip("*"))]
@@ -288,3 +294,208 @@ def test_filled_sim_sell_writes_symbol_lock():
     )
     assert applied[0].status == "filled"
     assert any("risk:lock:symbol:" in key for key in redis.store)
+
+
+# ── 扫描噪音治理：非可执行事件去重 + 失败退避 ─────────────────────────────
+
+
+def _collect_events(monkeypatch) -> list[str]:
+    events: list[str] = []
+
+    async def fake_persist(_db, candidate, **_kwargs):
+        events.append(str(candidate.status))
+        return candidate
+
+    monkeypatch.setattr(trigger_service, "persist_event", fake_persist)
+    return events
+
+
+def _stop_loss_candidate(quotes=None):
+    return evaluate_account(
+        positions={"600036.SH": _pos()},
+        quotes=quotes
+        if quotes is not None
+        else {"600036.SH": QuoteView("600036.SH", 9.0)},
+        rules=[_rule("position_stop_loss", -0.08)],
+        user_id=1,
+    )[0]
+
+
+def test_skipped_no_quote_events_are_throttled(monkeypatch):
+    """无行情持仓每 60s 都会重新命中，窗口内只允许落一条事件。"""
+    events = _collect_events(monkeypatch)
+    redis = _FakeRedis()
+    candidate = _stop_loss_candidate(quotes={})
+    assert candidate.status == "skipped_no_quote"
+
+    for _ in range(5):
+        asyncio.run(
+            apply_candidates(
+                _FakeDB(),
+                redis,
+                [_stop_loss_candidate(quotes={})],
+                tenant_id="default",
+                user_id=1,
+                trade_date=date(2026, 9, 13),
+            )
+        )
+
+    assert events == ["skipped_no_quote"]
+
+
+def test_skipped_t1_events_are_throttled_per_day(monkeypatch):
+    events = _collect_events(monkeypatch)
+    redis = _FakeRedis()
+
+    def make():
+        return evaluate_account(
+            positions={"600036.SH": _pos(available=0, cost=10.0)},
+            quotes={"600036.SH": QuoteView("600036.SH", 9.0)},
+            rules=[_rule("position_stop_loss", -0.08)],
+            user_id=1,
+        )[0]
+
+    for _ in range(3):
+        asyncio.run(
+            apply_candidates(
+                _FakeDB(),
+                redis,
+                [make()],
+                tenant_id="default",
+                user_id=1,
+                trade_date=date(2026, 9, 13),
+            )
+        )
+
+    assert events == ["skipped_t1"]
+
+
+def test_failed_sell_sets_backoff_and_skips_next_attempts(monkeypatch):
+    """跌停封死导致成交失败后，退避窗内不再重复下单（原来每 60s 撞一次）。"""
+    events = _collect_events(monkeypatch)
+    redis = _FakeRedis()
+    calls = {"n": 0}
+
+    async def fail(**_kwargs):
+        calls["n"] += 1
+        return {
+            "success": False,
+            "message": "Limit-down locked, sell order cannot be filled",
+        }
+
+    applied = asyncio.run(
+        apply_candidates(
+            _FakeDB(),
+            redis,
+            [_stop_loss_candidate()],
+            tenant_id="default",
+            user_id=1,
+            trade_date=date(2026, 9, 13),
+            execute_order=fail,
+        )
+    )
+    assert applied[0].status == "failed"
+    assert calls["n"] == 1
+    assert any("risk:retry:" in key for key in redis.store)
+
+    # 退避窗内再扫到同一标的：不再下单、不再写事件
+    applied = asyncio.run(
+        apply_candidates(
+            _FakeDB(),
+            redis,
+            [_stop_loss_candidate()],
+            tenant_id="default",
+            user_id=1,
+            trade_date=date(2026, 9, 13),
+            execute_order=fail,
+        )
+    )
+    assert applied[0].status == "skipped_backoff"
+    assert calls["n"] == 1
+    assert events == ["failed"]
+
+
+def test_failed_events_are_throttled_within_window(monkeypatch):
+    """退避窗过后再次失败也只留一条事件（默认 1 小时窗口）。"""
+    events = _collect_events(monkeypatch)
+    redis = _FakeRedis()
+
+    async def fail(**_kwargs):
+        return {
+            "success": False,
+            "message": "Limit-down locked, sell order cannot be filled",
+        }
+
+    for _ in range(3):
+        # 模拟退避到期：只清退避键，事件去重键保留
+        for key in [k for k in redis.store if str(k).startswith("risk:retry:")]:
+            redis.delete(key)
+        asyncio.run(
+            apply_candidates(
+                _FakeDB(),
+                redis,
+                [_stop_loss_candidate()],
+                tenant_id="default",
+                user_id=1,
+                trade_date=date(2026, 9, 13),
+                execute_order=fail,
+            )
+        )
+
+    assert events == ["failed"]
+
+
+def test_success_clears_retry_backoff(monkeypatch):
+    _collect_events(monkeypatch)
+    redis = _FakeRedis()
+
+    async def fail(**_kwargs):
+        return {"success": False, "message": "Limit-down locked"}
+
+    async def ok(**_kwargs):
+        return {"success": True, "order_id": "ord-1", "message": "filled"}
+
+    asyncio.run(
+        apply_candidates(
+            _FakeDB(),
+            redis,
+            [_stop_loss_candidate()],
+            tenant_id="default",
+            user_id=1,
+            trade_date=date(2026, 9, 13),
+            execute_order=fail,
+        )
+    )
+    assert any("risk:retry:" in key for key in redis.store)
+
+    for key in [k for k in redis.store if str(k).startswith("risk:fired:")]:
+        redis.delete(key)
+    applied = asyncio.run(
+        apply_candidates(
+            _FakeDB(),
+            redis,
+            [_stop_loss_candidate()],
+            tenant_id="default",
+            user_id=1,
+            trade_date=date(2026, 9, 13),
+            execute_order=ok,
+        )
+    )
+    assert applied[0].status == "skipped_backoff"
+
+    # 退避到期后成交成功 → 退避键被清掉
+    for key in [k for k in redis.store if str(k).startswith("risk:retry:")]:
+        redis.delete(key)
+    applied = asyncio.run(
+        apply_candidates(
+            _FakeDB(),
+            redis,
+            [_stop_loss_candidate()],
+            tenant_id="default",
+            user_id=1,
+            trade_date=date(2026, 9, 13),
+            execute_order=ok,
+        )
+    )
+    assert applied[0].status == "filled"
+    assert not any(str(k).startswith("risk:retry:") for k in redis.store)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any
@@ -15,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.live_trading.services.risk_lock import (
     already_fired,
     mark_fired,
+    normalize_lock_symbol,
+    normalize_lock_user,
     write_account_lock,
     write_symbol_lock,
 )
@@ -64,6 +67,147 @@ _QUOTE_PRICE_FIELDS = ("Now", "last_price", "current_price", "price", "close", "
 _QUOTE_PCT_FIELDS = ("pct_chg", "pct_change", "change_percent", "change_pct", "pct", "ChgRatio")
 QuoteFetcher = Callable[[list[str]], dict[str, QuoteView]]
 ExecuteHook = Callable[..., Any]
+
+_EVENT_DEDUP_PREFIX = "risk:event:"
+_RETRY_BACKOFF_PREFIX = "risk:retry:"
+
+# 非可执行候选（无行情 / T+1 / 空仓 / 当日已触发）的记录窗口。
+# 60s 扫描 × 全天会把同一只票写成上千行（实测单日 1871 条 skipped_no_quote、
+# 71 条 skipped_t1），这里按「状态 + 规则 + 标的」窗口去重，只留窗口内第一条。
+_NOISE_EVENT_TTL: dict[str, int] = {
+    "skipped_no_quote": 1800,
+    "skipped_t1": 86400,
+    "skipped_empty": 86400,
+    "skipped_dedup": 1800,
+}
+
+
+def _env_seconds(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(60, int(float(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
+def retry_backoff_seconds() -> int:
+    """成交失败（跌停封死/无买盘）后的重试退避，默认 10 分钟。"""
+    return _env_seconds("RISK_RETRY_BACKOFF_SEC", 600)
+
+
+def failure_event_ttl_seconds() -> int:
+    """同一标的失败事件的记录窗口，默认 1 小时。"""
+    return _env_seconds("RISK_FAILURE_EVENT_TTL_SEC", 3600)
+
+
+def _day_text(trade_date: date | str) -> str:
+    return trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date)
+
+
+def _event_dedup_key(
+    *,
+    status: str,
+    tenant_id: str,
+    user_id: Any,
+    trade_date: date | str,
+    rule_id: int | None,
+    symbol: str,
+) -> str:
+    return (
+        f"{_EVENT_DEDUP_PREFIX}{status}:{tenant_id or 'default'}:"
+        f"{normalize_lock_user(user_id)}:{_day_text(trade_date)}:"
+        f"{int(rule_id or 0)}:{normalize_lock_symbol(symbol)}"
+    )
+
+
+def _retry_backoff_key(
+    *, tenant_id: str, user_id: Any, trade_date: date | str, symbol: str
+) -> str:
+    return (
+        f"{_RETRY_BACKOFF_PREFIX}{tenant_id or 'default'}:"
+        f"{normalize_lock_user(user_id)}:{_day_text(trade_date)}:"
+        f"{normalize_lock_symbol(symbol)}"
+    )
+
+
+def _raw_client(redis: Any) -> Any:
+    return getattr(redis, "client", redis)
+
+
+def _reserve_once(redis: Any, key: str, ttl: int) -> bool:
+    """窗口内只放行一次；Redis 不可用时放行（宁可多记，不能漏记）。"""
+    client = _raw_client(redis)
+    if client is None:
+        return True
+    try:
+        return bool(client.set(key, "1", ex=max(60, int(ttl)), nx=True))
+    except Exception as exc:  # noqa: BLE001 - 去重失败不能阻断风控
+        logger.debug("risk trigger event throttle failed: %s", exc)
+        return True
+
+
+def retry_backoff_active(
+    redis: Any, *, tenant_id: str, user_id: Any, trade_date: date | str, symbol: str
+) -> bool:
+    client = _raw_client(redis)
+    if client is None:
+        return False
+    try:
+        return bool(
+            client.get(
+                _retry_backoff_key(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    trade_date=trade_date,
+                    symbol=symbol,
+                )
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def set_retry_backoff(
+    redis: Any, *, tenant_id: str, user_id: Any, trade_date: date | str, symbol: str
+) -> None:
+    client = _raw_client(redis)
+    if client is None:
+        return
+    try:
+        client.set(
+            _retry_backoff_key(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trade_date=trade_date,
+                symbol=symbol,
+            ),
+            "1",
+            ex=retry_backoff_seconds(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("risk trigger retry backoff write failed: %s", exc)
+
+
+def clear_retry_backoff(
+    redis: Any, *, tenant_id: str, user_id: Any, trade_date: date | str, symbol: str
+) -> None:
+    client = _raw_client(redis)
+    if client is None:
+        return
+    try:
+        client.delete(
+            _retry_backoff_key(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trade_date=trade_date,
+                symbol=symbol,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("risk trigger retry backoff clear failed: %s", exc)
+
 
 _remote_quote_client = None
 
@@ -391,6 +535,22 @@ async def execute_candidate(
 ) -> TriggerCandidate:
     """Apply one candidate. dry_run / REAL never place simulation orders."""
     if candidate.status not in {"pending"}:
+        # 非可执行状态按窗口去重：无行情/T+1 这类事件每分钟都会重新命中，
+        # 不去重就是 60s × 全天 × 持仓数的垃圾行。
+        ttl = _NOISE_EVENT_TTL.get(str(candidate.status))
+        if ttl is not None and not _reserve_once(
+            redis,
+            _event_dedup_key(
+                status=str(candidate.status),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trade_date=trade_date,
+                rule_id=candidate.rule_id,
+                symbol=candidate.symbol,
+            ),
+            ttl,
+        ):
+            return candidate
         await persist_event(db, candidate, tenant_id=tenant_id, user_id=user_id, trade_date=trade_date)
         return candidate
 
@@ -422,6 +582,19 @@ async def execute_candidate(
         _notify(user_id, tenant_id, candidate)
         return candidate
 
+    # 上次成交失败（如跌停封死）后的退避窗内不再下单：否则每 60s 撞一次撮合，
+    # simulation_orders 里堆满 rejected 弃单、risk_events 里堆满 failed 记录。
+    if retry_backoff_active(
+        redis,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        trade_date=trade_date,
+        symbol=candidate.symbol,
+    ):
+        candidate.status = "skipped_backoff"
+        candidate.message = (candidate.message or "") + " [成交失败退避中]"
+        return candidate
+
     if execute_order is None:
         execute_order = _default_execute_sim_sell
 
@@ -439,6 +612,13 @@ async def execute_candidate(
         logger.exception("risk trigger execute failed symbol=%s", candidate.symbol)
         candidate.status = "failed"
         candidate.message = f"{candidate.message}; execute error: {exc}"
+        set_retry_backoff(
+            redis,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            trade_date=trade_date,
+            symbol=candidate.symbol,
+        )
         await persist_event(db, candidate, tenant_id=tenant_id, user_id=user_id, trade_date=trade_date)
         return candidate
 
@@ -450,14 +630,34 @@ async def execute_candidate(
             candidate.message = f"{candidate.message}; {result['message']}"
     if not success:
         candidate.status = "failed"
-        await persist_event(
-            db,
-            candidate,
+        set_retry_backoff(
+            redis,
             tenant_id=tenant_id,
             user_id=user_id,
             trade_date=trade_date,
-            order_ids=[order_id] if order_id else [],
+            symbol=candidate.symbol,
         )
+        # 失败事件按窗口去重（退避 10 分钟、事件 1 小时），保留可追溯但不刷屏。
+        if _reserve_once(
+            redis,
+            _event_dedup_key(
+                status="failed",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trade_date=trade_date,
+                rule_id=candidate.rule_id,
+                symbol=candidate.symbol,
+            ),
+            failure_event_ttl_seconds(),
+        ):
+            await persist_event(
+                db,
+                candidate,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                trade_date=trade_date,
+                order_ids=[order_id] if order_id else [],
+            )
         return candidate
 
     candidate.status = "filled"
@@ -468,6 +668,13 @@ async def execute_candidate(
         user_id=user_id,
         trade_date=trade_date,
         order_ids=[order_id] if order_id else [],
+    )
+    clear_retry_backoff(
+        redis,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        trade_date=trade_date,
+        symbol=candidate.symbol,
     )
     if candidate.action == "flatten_all":
         write_account_lock(redis, tenant_id, user_id, trade_date)
