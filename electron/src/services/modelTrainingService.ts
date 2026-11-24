@@ -225,6 +225,19 @@ export interface TrainingRunHistoryResponse {
   offset: number;
 }
 
+export interface ModelLastInference {
+  /** 最近一次成功推理的基准数据日（YYYY-MM-DD）；null = 从未成功推理。 */
+  last_inference_date: string | null;
+  /** 对应的预测日（基准数据日 + 预测周期）。 */
+  last_prediction_date: string | null;
+  /** 最近一次成功推理的落库时间（ISO）。 */
+  last_success_at: string | null;
+  /** 最近一次运行状态（completed / failed），含失败。 */
+  last_status: string | null;
+  /** 最近一次运行时间（ISO，含失败）。 */
+  last_run_at: string | null;
+}
+
 export interface UserModelRecord {
   tenant_id: string;
   user_id: string;
@@ -247,6 +260,11 @@ export interface UserModelRecord {
    * 这类语义问题——那是推理前检的结论。
    */
   asset_gaps?: string[];
+  /**
+   * 最近推理摘要（`GET /models` 附带）：模型管理页靠它标出「从未推理」或
+   * 「最近一次运行失败」的模型，避免漏跑。无任何推理记录时为空。
+   */
+  last_inference?: ModelLastInference | null;
 }
 
 /** ─── 模型融合（机构级 v2，见 docs/机构级模型融合_设计方案.md） ─── */
