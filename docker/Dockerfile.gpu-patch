@@ -9,6 +9,8 @@ COPY docker/training/parallel_utils.py /app/parallel_utils.py
 COPY docker/training/sample_weights.py /app/sample_weights.py
 COPY docker/training/label_diagnostics.py /app/label_diagnostics.py
 COPY docker/training/model_trainers /app/model_trainers
+COPY docker/training/diagnostics /app/diagnostics
+COPY docker/training/data /app/data
 COPY docker/training /app/docker/training
 
 LABEL qm.torch.device=gpu
