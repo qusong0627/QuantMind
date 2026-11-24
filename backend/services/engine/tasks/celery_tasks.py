@@ -1204,6 +1204,10 @@ def _write_default_backfill_dispatch_logs(result: dict[str, Any]) -> None:
             else:
                 status, reason = "failed", "BACKFILL_FAILED"
             cutoff = d.get("data_cutoff_date")
+            # pred.parquet 没写上 = 缺口没闭合，下一轮还会再来一次；
+            # 必须用一个独立的 reason_code 把它和「推理本身失败」区分开。
+            if d.get("merge_error"):
+                reason = "PRED_MERGE_FAILED"
             db.execute(
                 sa_text(
                     """
@@ -1229,6 +1233,7 @@ def _write_default_backfill_dispatch_logs(result: dict[str, Any]) -> None:
                     "reason_code": reason,
                     "reason_detail": (
                         f"gap={d.get('gap')} appended={d.get('appended')} "
+                        f"rebuilt={d.get('rebuilt')} capped={d.get('capped')} "
                         f"failed={d.get('failed')} error={d.get('error') or ''}"
                     )[:500],
                 },
@@ -1237,6 +1242,48 @@ def _write_default_backfill_dispatch_logs(result: dict[str, Any]) -> None:
     finally:
         db.close()
         engine.dispose()
+
+
+@celery_app.task(name="engine.tasks.purge_inference_signal_storage")
+def purge_inference_signal_storage_task(
+    retention_days: int = 0, dry_run: bool = False
+) -> dict[str, Any]:
+    """清理超出保留窗口的推理落库数据（信号明细/候选快照/幽灵 run/调度留痕）。
+
+    为什么需要独立 janitor：`script_runner` 的 Step 0.1 只在「该用户还有模型在跑」
+    时顺带执行。客户侧典型场景恰恰是试训一批模型后再也不跑 —— 旧 feature_version
+    的整块历史从此没有任何删除路径，两张表只增不减。本任务口径与 Step 0.1 一致
+    （按 tenant+user+信号生效日的自然日窗口），并额外回收：
+    - 明细已过期、且同日无任何 run 存活的 qm_research_candidate_snapshot 行；
+    - 指向空批次的 qm_model_inference_runs 历史记录；
+    - 每 30 分钟一轮写出的 qm_model_inference_dispatch_logs 留痕。
+
+    retention_days<=0 时取 INFERENCE_PREDICTION_RETENTION_DAYS（默认 365）。
+    dry_run=True 只统计不删除，可先 `celery call` 预演。
+    """
+    from backend.services.engine.services.signal_storage_janitor import (
+        DEFAULT_RETENTION_DAYS,
+        purge_signal_storage,
+    )
+
+    days = int(retention_days or 0)
+    if days <= 0:
+        days = DEFAULT_RETENTION_DAYS
+    try:
+        result = purge_signal_storage(
+            retention_days=days, dry_run=bool(dry_run)
+        )
+    except Exception as exc:  # noqa: BLE001 - 定时清理失败不能污染 worker
+        logger.exception("[SignalStorageJanitor] 失败: %s", exc)
+        return {"status": "failed", "error": str(exc)}
+    logger.info(
+        "[SignalStorageJanitor] retention=%dd dry_run=%s users=%s stats=%s",
+        days,
+        bool(dry_run),
+        result.get("users"),
+        result.get("stats"),
+    )
+    return result
 
 
 @celery_app.task(name="engine.tasks.backfill_inference_quality")

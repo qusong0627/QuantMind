@@ -69,6 +69,56 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    # 补跑前先看这一天的分数是否已经落库。
+    # 上游「今天有没有 run」的判据来自 qm_model_inference_runs / dispatch_logs，
+    # 而 celery 自动补全写 dispatch_logs 时 run_id 恒为 NULL（见
+    # _write_default_backfill_dispatch_logs），于是 Beat 已经推理过的日子在复盘侧
+    # 仍然「看不到 run」，于是再推理一遍：engine_signal_scores 唯一键含 run_id，
+    # 每次补跑都是净新增整份全市场截面。这里改用落库分数本身作为凭证。
+    try:
+        import asyncpg
+        import asyncio
+        import os
+
+        async def _already_scored() -> int:
+            conn = await asyncpg.connect(
+                host=os.getenv("DB_HOST", "quantmind-db"),
+                port=int(os.getenv("DB_PORT", "5432")),
+                user=os.getenv("DB_USER", "quantmind"),
+                password=os.getenv("DB_PASSWORD", "quantmind123"),
+                database=os.getenv("DB_NAME", "quantmind"), timeout=10,
+            )
+            try:
+                return int(
+                    await conn.fetchval(
+                        """
+                        SELECT coalesce(max(n), 0) FROM (
+                            SELECT count(DISTINCT symbol) AS n
+                            FROM qm_research_candidate_snapshot
+                            WHERE tenant_id = $1 AND model_id = $2
+                              AND data_trade_date = $3
+                            GROUP BY run_id
+                        ) x
+                        """,
+                        tenant_id or "default",
+                        model_id,
+                        iso,
+                    )
+                    or 0
+                )
+            finally:
+                await conn.close()
+
+        existing = asyncio.run(_already_scored()) if model_id else 0
+        if existing >= int(os.getenv("DAILY_REVIEW_SKIP_IF_SCORED_MIN_SYMBOLS", "1000")):
+            print(
+                f"{iso} 已有落库分数 {existing} 只（model={model_id}），跳过补跑",
+                flush=True,
+            )
+            return 0
+    except Exception as exc:  # noqa: BLE001 - 守卫失败时照常补跑，不能漏信号
+        print(f"补跑前查重失败（继续补跑）: {exc}", flush=True)
+
     from backend.services.engine.inference.router_service import InferenceRouterService
 
     svc = InferenceRouterService()

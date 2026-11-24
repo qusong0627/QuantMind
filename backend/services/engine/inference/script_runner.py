@@ -205,7 +205,21 @@ _DEFAULT_FEATURE_DIM = int(os.getenv("INFERENCE_DEFAULT_FEATURE_DIM", "48"))
 _MIN_READY_SYMBOLS = int(os.getenv("INFERENCE_MIN_READY_SYMBOLS", "3000"))
 _MIN_READY_RATIO = float(os.getenv("INFERENCE_MIN_READY_RATIO", "0.9"))
 _MIN_READY_FLOOR = int(os.getenv("INFERENCE_MIN_READY_FLOOR", "100"))
-_PREDICTION_RETENTION_DAYS = int(os.getenv("INFERENCE_PREDICTION_RETENTION_DAYS", "730"))
+# 信号明细落库保留窗口（自然日）。历史默认值 730 与注释/README 声称的「30 天」
+# 不一致，且清理语句被 model_version+feature_version 绑死（见 _persist_locked
+# Step 0.1），换过一次模型后旧 feature_version 的整块历史就再也没有删除路径。
+# 现在取 365 天：保留一整年信号（与批量回测最大窗口同源），清理条件改为按
+# tenant+user+日期，与 model_version/feature_version 无关；再叠加单日并存
+# run 数上限，膨胀倍数从「无上限」收敛到固定值。更长窗口显式抬高该值。
+_PREDICTION_RETENTION_DAYS = int(os.getenv("INFERENCE_PREDICTION_RETENTION_DAYS", "365"))
+# 同一 (tenant, user, feature_version, 预测日) 最多并存多少个 run。
+# engine_signal_scores 唯一键含 run_id，且 run_id 每次执行都是新 UUID，
+# 自动补全/托管交易/技能脚本/手动点击在同一天上只会「追加」而不会覆盖
+# （跨 run 删除因会误伤同日其它 run 已被移除，见 Step 0.2 注释）。
+# 没有上限时，一轮失控的重推循环就能把单日截面复制几十份
+# （每份 ~5000 行 × 两张表 + 索引）。超限时删除最旧的超额 run：
+# 读侧一律取「最新 run」，正常运维（每日 2-3 个 run）不受影响。
+_MAX_RUNS_PER_PREDICTION_DAY = int(os.getenv("INFERENCE_MAX_RUNS_PER_PREDICTION_DAY", "6"))
 
 # Redis 标记键：记录当日推理已完成
 _COMPLETED_REDIS_KEY_PREFIX = "qm:inference:completed"
@@ -1752,20 +1766,31 @@ class InferenceScriptRunner:
             prediction_day - timedelta(days=max(1, _PREDICTION_RETENTION_DAYS))
         ).isoformat()
 
-        # ── Step 0.1: 清理超出保留期的历史数据（默认 30 天）────────────
+        # ── Step 0.1: 清理超出保留期的历史数据 ────────────────────────────
+        # 窗口取 INFERENCE_PREDICTION_RETENTION_DAYS（默认 365 天）。
+        # 旧写法把删除条件绑死在 model_version='inference_script' + 本次的
+        # feature_version 上，两个后果：
+        #   1) 精调/换模型会生成新 model_id → 新 feature_version
+        #      （_resolve_feature_version = script_v1_{model_id slug}），
+        #      旧模型的整块历史从此没有任何删除路径，只会随重训练永久堆积；
+        #   2) /engine/runs/{run_id}/signal-ready 用调用方传入的 model_version/
+        #      feature_version 落库（realtime_contract.py），同样永远命中不了。
+        # 保留策略按「谁写的」分区没有业务意义（表按 tenant/user 隔离），因此这里
+        # 只按 tenant_id + user_id + trade_date 清，覆盖全部来源。
+        # 额外条件 created_at < now()-1day：批量回测会在一次任务里连写几十上百个
+        # 历史日，聚合阶段还要回读它们；没有这个保护，写最新一天时就会把本轮刚写好
+        # 的早期日期顺手删掉，聚合结果静默缺日。
         db.execute(
             text("""
                 DELETE FROM engine_signal_scores
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
-                  AND model_version = 'inference_script'
-                  AND feature_version = :feature_version
                   AND trade_date < :retention_floor
+                  AND created_at < NOW() - INTERVAL '1 day'
             """),
             {
                 "tenant_id": tenant_id,
                 "user_id": user_id,
-                "feature_version": feature_version,
                 "retention_floor": retention_floor,
             },
         )
@@ -1774,17 +1799,134 @@ class InferenceScriptRunner:
                 DELETE FROM engine_feature_runs
                 WHERE tenant_id = :tenant_id
                   AND user_id = :user_id
-                  AND source = 'inference_script'
-                  AND feature_version = :feature_version
                   AND trade_date < :retention_floor
+                  AND created_at < NOW() - INTERVAL '1 day'
+            """),
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "retention_floor": retention_floor,
+            },
+        )
+        # 候选池快照此前只在 Step 3 按 run_id 删（重试幂等），没有任何时间维度
+        # 清理 → 每次重推理都是净新增，是全库增长最快的一张表（线上 84 万行中
+        # 约 25 万行来自 2026-09-25 一轮 OOM 重推循环）。口径与上面一致，
+        # 按信号生效日（prediction_trade_date）保留同一窗口。
+        db.execute(
+            text("""
+                DELETE FROM qm_research_candidate_snapshot
+                WHERE tenant_id = :tenant_id
+                  AND user_id = :user_id
+                  AND prediction_trade_date < :retention_floor
+                  AND created_at < NOW() - INTERVAL '1 day'
+            """),
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "retention_floor": retention_floor,
+            },
+        )
+
+        # ── Step 0.1b: 单日并存 run 数硬上限（防失控循环净新增）────────────
+        # 唯一键含 run_id + 每次执行都是新 UUID，意味着「重推同一天」是追加而非
+        # 覆盖。自动补全每 30 分钟一轮，一旦 pred.parquet 缺口不闭合就会反复追加
+        # 整天截面（~5000 行 × 两张表 + 索引）。这里把同一 (fv, 预测日) 并存的
+        # 全市场量级 run 数限制在 INFERENCE_MAX_RUNS_PER_PREDICTION_DAY 内，
+        # 超出部分从最旧开始淘汰明细：读侧一律取最新 run，淘汰更早的副本
+        # 不影响在途链路（单股补推/股票池的小 run 不参与，避免误伤 predict-stock）。
+        _cap = max(1, _MAX_RUNS_PER_PREDICTION_DAY)
+        _same_day_runs = db.execute(
+            text("""
+                SELECT run_id, max(created_at) AS last_created
+                FROM engine_signal_scores
+                WHERE tenant_id = :tenant_id
+                  AND user_id = :user_id
+                  AND feature_version = :feature_version
+                  AND trade_date = :trade_date
+                  AND run_id <> :run_id
+                GROUP BY run_id
+                HAVING count(*) >= :min_symbols
+                ORDER BY max(created_at) ASC
             """),
             {
                 "tenant_id": tenant_id,
                 "user_id": user_id,
                 "feature_version": feature_version,
-                "retention_floor": retention_floor,
+                "trade_date": prediction_trade_date,
+                "run_id": run_id,
+                # 只淘汰「全市场量级」的旧 run：阈值与守卫口径一致（1000 只），
+                # 股票池/单股补推的小 run 留给各自的读侧，不参与淘汰。
+                "min_symbols": max(1000, _MIN_READY_FLOOR),
             },
-        )
+        ).fetchall()
+        # 升序排列，末尾是最新；本次还要再写入 1 个 run，故只保留最后 cap-1 个
+        surplus_run_ids = [
+            str(r[0]) for r in _same_day_runs[: max(0, len(_same_day_runs) - (_cap - 1))]
+        ]
+        if surplus_run_ids:
+            db.execute(
+                text("""
+                    DELETE FROM engine_signal_scores
+                    WHERE run_id = ANY(:run_ids)
+                      AND tenant_id = :tenant_id
+                      AND user_id = :user_id
+                """),
+                {"run_ids": surplus_run_ids, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            db.execute(
+                text("""
+                    DELETE FROM qm_research_candidate_snapshot
+                    WHERE run_id = ANY(:run_ids)
+                      AND tenant_id = :tenant_id
+                      AND user_id = :user_id
+                """),
+                {"run_ids": surplus_run_ids, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            db.execute(
+                text("""
+                    DELETE FROM engine_feature_runs
+                    WHERE run_id = ANY(:run_ids)
+                      AND tenant_id = :tenant_id
+                      AND user_id = :user_id
+                """),
+                {"run_ids": surplus_run_ids, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            # 推理历史记录不删（策略/托管/订单会以 run_id 回链，删了会断审计），
+            # 只把它标成 archived：读侧按 status='completed' 过滤，自然看不到，
+            # 也不会出现「点进详情是空」的误导。
+            db.execute(
+                text("""
+                    UPDATE qm_model_inference_runs
+                    SET status = 'archived',
+                        failure_stage = 'storage_recycled',
+                        error_message = '单日并存 run 超过 INFERENCE_MAX_RUNS_PER_PREDICTION_DAY，明细已回收',
+                        updated_at = NOW()
+                    WHERE run_id = ANY(:run_ids)
+                      AND tenant_id = :tenant_id
+                      AND user_id = :user_id
+                """),
+                {"run_ids": surplus_run_ids, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            # 设置表里的 last_run_id 不能指向已被回收的 run
+            db.execute(
+                text("""
+                    UPDATE qm_model_inference_settings
+                    SET last_run_id = NULL, last_run_json = NULL, updated_at = NOW()
+                    WHERE tenant_id = :tenant_id
+                      AND user_id = :user_id
+                      AND last_run_id = ANY(:run_ids)
+                """),
+                {"run_ids": surplus_run_ids, "tenant_id": tenant_id, "user_id": user_id},
+            )
+            logger.warning(
+                "[InferenceScriptRunner] 单日并存 run 超过上限 %d，已淘汰最旧 %d 个: %s "
+                "(fv=%s, trade_date=%s)",
+                _cap,
+                len(surplus_run_ids),
+                ",".join(surplus_run_ids[:5]),
+                feature_version,
+                prediction_trade_date,
+            )
 
         # ── Step 0.2: 幂等清理（仅本 run_id，不碰其它 run）───────────────
         # 历史逻辑按 (date, bucket[, symbols]) 跨 run 删除，导致池/单股 partial

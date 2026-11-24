@@ -76,7 +76,7 @@
 - 模型维度不再固定 48：后端按 `metadata.json` / `feature_schema.json` / `input_spec.tensor_shape` 动态解析期望维度（解析失败才回退 `INFERENCE_DEFAULT_FEATURE_DIM`）。
 - 维度门禁查询已适配 `market_data_daily` 多种字段形态：支持 `features(JSONB array)` 与 `feature_*` 列自动探测；若仅存在其中一种会自动降级，不再因缺少另一种列触发 SQL 异常阻断。
 - “覆盖数阈值”改为自适应：综合 `INFERENCE_MIN_READY_SYMBOLS`（绝对上限）、`INFERENCE_MIN_READY_RATIO`（比例阈值，默认 0.9）、`INFERENCE_MIN_READY_FLOOR`（最低下限，默认 100）计算。
-- 推理结果保留策略：`engine_signal_scores/engine_feature_runs` 的 `inference_script` 数据默认仅保留最近 30 天（可通过 `INFERENCE_PREDICTION_RETENTION_DAYS` 调整）。
+- 推理结果保留策略：`engine_signal_scores/engine_feature_runs/qm_research_candidate_snapshot` 默认保留最近 365 天（`INFERENCE_PREDICTION_RETENTION_DAYS` 可调）。清理按 `tenant_id + user_id + 信号生效日` 生效，不再区分 `model_version/feature_version`，并另有单日并存 run 上限与每日兜底清理任务（见 `backend/services/engine/inference/README.md`「数据保留与膨胀防线」）。
 - 新增管理员预测查询接口：
   - `GET /api/v1/admin/models/predictions`：按预测日/租户/用户/run_id 查询预测批次；
   - `GET /api/v1/admin/models/predictions/{run_id}`：查看批次内 symbol 分数明细。

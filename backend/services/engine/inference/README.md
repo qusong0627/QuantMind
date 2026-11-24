@@ -81,10 +81,25 @@
 - `qm:signal:latest:{tenant_id}:{user_id}` 保存最近一次可消费的 `run_id`，runner 只接受该版本对应的 stream 消息
 - 激活触发、管理员触发、Celery 触发三条链路统一使用上述口径
 
-数据保留策略：
+数据保留与膨胀防线（自动推理曾把 PG 撑到几十 GB，根因与修复见
+`gap_backfill.py` / `script_runner.py` 的「防线」注释）：
 
-- `inference_script` 写库链路默认只保留最近 30 天预测数据；
-- 可通过 `INFERENCE_PREDICTION_RETENTION_DAYS` 调整保留窗口。
+- 保留窗口 `INFERENCE_PREDICTION_RETENTION_DAYS`（默认 365 天）：
+  `engine_signal_scores` / `engine_feature_runs` 按 `trade_date`、
+  `qm_research_candidate_snapshot` 按 `prediction_trade_date` 滚动清理，
+  清理条件只认 `tenant_id + user_id + 日期`，不再绑定 `model_version` /
+  `feature_version`（换模型后旧特征版本块永久留存的老问题）。
+- 单日并存 run 上限 `INFERENCE_MAX_RUNS_PER_PREDICTION_DAY`（默认 6）：
+  唯一键含 `run_id` 且每次执行都是新 UUID，重推同一天是「净新增」，
+  超限从最旧开始淘汰（含其 `engine_feature_runs` 与推理历史行）。
+- 补全前先看库：缺口日期若在 `qm_research_candidate_snapshot` 已有足量分数
+  （`INFERENCE_BACKFILL_DB_MIN_SYMBOLS`，默认 1000 只），不再重复推理，
+  直接把已落库分数回写 `pred.parquet`（`backfill_guard.py`）。
+- 单轮补全天数上限 `INFERENCE_BACKFILL_MAX_DAYS_PER_RUN`（默认 30），
+  分批落盘 `INFERENCE_BACKFILL_MERGE_EVERY_DAYS`（默认 5 日一合），
+  合并失败/返回 0 行都会把状态改成 partial/failed（不再伪装 completed）。
+- 每日 03:40 `engine.tasks.purge_inference_signal_storage` 兜底清理
+  已经不再被推理的用户/模型留下的存量（`signal_storage_janitor.py`）。
 
 维度与覆盖门禁说明：
 

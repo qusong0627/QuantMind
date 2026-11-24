@@ -460,6 +460,16 @@ CREATE TABLE IF NOT EXISTS qm_research_candidate_snapshot (
     UNIQUE (tenant_id, user_id, run_id, symbol)
 );
 
+-- 推理落库治理需要的索引（此前只能全表扫描，百万行级别的守卫/清理查询
+-- 在客户机上要跑几分钟，直接拖垮 Beat 那一轮的超时预算）：
+--   1) 保留期清理按 (tenant_id, user_id, prediction_trade_date) 删除；
+--   2) 缺口守卫按 (tenant_id, user_id, model_id, data_trade_date) 查
+--      「这一天的分数是不是已经落过库」（避免重复推理的主判据）。
+CREATE INDEX IF NOT EXISTS idx_qrcs_tenant_user_ptd
+    ON qm_research_candidate_snapshot (tenant_id, user_id, prediction_trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_qrcs_tenant_user_model_data
+    ON qm_research_candidate_snapshot (tenant_id, user_id, model_id, data_trade_date);
+
 -- ========================
 -- 17. QM_USER_WATCHLIST
 -- ========================

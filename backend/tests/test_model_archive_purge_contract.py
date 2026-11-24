@@ -277,8 +277,9 @@ def test_beat_schedule_exposes_both_env_knobs() -> None:
 
 
 def test_beat_task_does_not_collide_with_existing_slots() -> None:
-    """03:30 需避开 02:30 质量回填与 04:00-05:50 每 10 分钟的快照。"""
+    """03:30 需避开 02:30 质量回填与 04:00-08:00 每 10 分钟的快照。"""
     text = CONFIG_PY.read_text(encoding="utf-8")
     assert 'crontab(minute="30", hour="2"' in text, "02:30 已被推理质量回填占用"
-    assert 'crontab(minute="*/10", hour="4-5"' in text, "04:00-05:50 已被快照占用"
+    # 快照窗口已放宽到 04:00-08:00（同步时刻由用户在前端配置，上界必须晚于晚同步）
+    assert 'crontab(minute="*/10", hour="4-8"' in text, "04:00-08:00 已被快照占用"
     assert 'crontab(minute="30", hour="3")' in text

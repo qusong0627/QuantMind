@@ -233,7 +233,8 @@ class ReplaySignal(Base, TimestampMixin):
     """回放专用信号表 —— 与 engine_signal_scores 完全隔离。
 
     隔离理由：
-    - engine_signal_scores 有 30 天保留期清理，回放历史信号会被误删
+    - engine_signal_scores 按保留窗口清理（默认 365 天，
+      `INFERENCE_PREDICTION_RETENTION_DAYS`），回放历史信号会被误删
     - 写入 engine_signal_scores 会覆写 Redis qm:signal:latest，干扰实盘门禁
     - ST 名单按当天算，历史回放会引入前视偏差
     - 回放信号只需 (symbol, score)，不需要 run_id/feature_version 等推理管线字段

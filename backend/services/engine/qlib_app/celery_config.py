@@ -186,6 +186,22 @@ if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="*/10", hour="4-8"),
     }
 
+# 推理落库存储治理：每日 03:50 按保留窗口清理信号明细/候选快照/幽灵 run/调度留痕。
+# 为什么不能只靠 script_runner 的 Step 0.1：那段清理只在「该用户还有模型在跑」时
+# 顺带执行，客户侧典型场景是试训一批模型后再也不跑，旧 feature_version 的整块历史
+# 从此没有任何删除路径（线上实测：7 个 feature_version 里 3 个已成死数据）。
+# 时刻避开 02:30 质量回填、03:30 归档模型硬删除与 04:00-08:00 市场快照窗口。
+if os.getenv("SIGNAL_STORAGE_JANITOR_ENABLED", "true").lower() == "true":
+    beat_schedule["purge-inference-signal-storage-daily"] = {
+        "task": "engine.tasks.purge_inference_signal_storage",
+        "schedule": crontab(minute="50", hour="3"),
+        "kwargs": {
+            "retention_days": int(os.getenv("INFERENCE_PREDICTION_RETENTION_DAYS", "365")),
+            "dry_run": os.getenv("SIGNAL_STORAGE_JANITOR_DRY_RUN", "false").lower()
+            == "true",
+        },
+    }
+
 # 已归档用户模型的保留期清理：归档是软删除（archive_model 只改 status），磁盘目录
 # （含 pred.parquet 全量历史分数）与 DB 行会永久残留。每日 03:30 硬删除超过保留期者。
 # 时刻选择：避开 02:30 的推理质量回填与 04:00-05:50 每 10 分钟的市场快照。

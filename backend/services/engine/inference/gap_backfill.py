@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -220,7 +221,10 @@ def compute_coverage(
                 "latest_trade_date": str(latest),
                 "data_cutoff_date": str(gap_end),
                 "estimated": True,
-                "is_up_to_date": False,
+                # 这里原先硬编码 False：parquet 缺失时永远「未最新」，
+                # 缺口为空也照样被当成待办。门控实际看 gap_dates，但管理台
+                # 与推理监控读的是这个字段，口径必须与 gap_dates 一致。
+                "is_up_to_date": len(gap) == 0,
                 "source": "quantdb_fallback",
             }
         return {
@@ -401,8 +405,12 @@ async def backfill_model_gaps(
             "status": "completed",
             "message": "已是最新",
             "gap": 0,
+            "gap_requested": 0,
+            "capped": False,
             "appended": 0,
+            "rebuilt": 0,
             "failed": 0,
+            "merge_error": "",
             "logs": [],
             "model_id": model_id,
         }
@@ -410,13 +418,28 @@ async def backfill_model_gaps(
             progress_cb(result)
         return result
 
+    from backend.services.engine.inference.backfill_guard import (
+        covered_dates_from_db,
+        scores_for_dates,
+    )
     from backend.services.engine.inference.pred_merge import merge_signals_into_pred
     from backend.services.engine.inference.script_runner import InferenceScriptRunner
 
     appended = 0
+    rebuilt = 0
     failed = 0
     logs: list[str] = []
     pred_signals: list[tuple[str, list[dict]]] = []
+
+    # ── 防线 2：库里已有分数的日期不再重推 ────────────────────────────────
+    # 缺口判定的唯一凭证是 pred.parquet；而落库（engine_signal_scores +
+    # 候选快照）在同一事务里先 commit，parquet 合并却在推理之后、且失败只记日志。
+    # 于是「分数在库里、parquet 没有」会永久算作缺口，被每 30 分钟一轮的 Beat
+    # 反复重推。这里先用库里已有分数把这些日期从缺口里摘出去，稍后回写 parquet。
+    db_covered = covered_dates_from_db(
+        tenant_id=tenant_id, user_id=user_id, model_id=model_id, dates=gaps
+    )
+
     parquet_file = next(
         (p for p in resolve_pred_candidates(storage_path) if p.is_file()), None
     )
@@ -431,6 +454,7 @@ async def backfill_model_gaps(
             "model_id": model_id,
             "gap": len(gaps),
             "appended": appended,
+            "rebuilt": rebuilt,
             "failed": failed,
             "logs": "\n".join(logs[-100:]),
             **extra,
@@ -441,6 +465,75 @@ async def backfill_model_gaps(
     _lineage_effective, _lineage_source = _resolve_backfill_model_lineage(
         tenant_id=tenant_id, user_id=user_id, model_id=model_id
     )
+
+    # ── 防线 4：分批落盘，进度不因进程被杀而丢 ──────────────────────────
+    # 旧写法把 merge 放在整个 for 之后：worker 被 OOM 杀掉 / 任务超时 SIGKILL，
+    # 本轮已经推理成功的日期全部作废（DB 有分数、parquet 没有），下一轮再来一遍。
+    # 每 N 日合并一次：merge 是「整文件重写」，N 太小会把 I/O 打满（pred.parquet
+    # 可达数百万行），太大又保不住进度，默认 10 日（单轮上限 30 日 → 最多 3 次重写）。
+    _merge_every = max(1, int(os.getenv("INFERENCE_BACKFILL_MERGE_EVERY_DAYS", "10")))
+    merge_error = ""
+    merged_rows = 0
+
+    def _flush_pred() -> None:
+        nonlocal merge_error, merged_rows
+        if not pred_signals:
+            return
+        if parquet_file is None:
+            # 模型目录不可用：分数只落在 PG，缺口无法闭合，必须如实报失败，
+            # 否则状态 completed 会让下一轮继续按同样的缺口重推。
+            merge_error = "pred.parquet 路径不可用，缺口未闭合"
+            logs.append(merge_error)
+            pred_signals.clear()
+            return
+        batch = list(pred_signals)
+        pred_signals.clear()
+        try:
+            merged = merge_signals_into_pred(
+                Path(parquet_file), batch, create_if_missing=True
+            )
+            if int(merged or 0) <= 0:
+                merge_error = "pred.parquet 合并返回 0 行（缺口未闭合）"
+                logs.append(merge_error)
+                logger.error("backfill %s %s", model_id, merge_error)
+                return
+            merged_rows += int(merged)
+            logs.append(f"pred.parquet 已合并 {merged} 行（{len(batch)} 日）")
+        except Exception as exc:
+            merge_error = f"pred.parquet 合并失败: {exc}"
+            logs.append(merge_error)
+            logger.error("backfill %s merge pred.parquet failed: %s", model_id, exc)
+
+    # ── 防线 2（执行）：库里已有分数的日期，回写 parquet 而不是重推理 ──────
+    if db_covered:
+        recovered = scores_for_dates(
+            tenant_id=tenant_id, user_id=user_id, model_id=model_id, dates=gaps
+        )
+        for _d, _signals in recovered:
+            rebuilt += 1
+            pred_signals.append((_d, _signals))
+            logs.append(
+                f"{_d} 已有落库分数 {len(_signals)} 只，跳过重复推理，仅回写 pred.parquet"
+            )
+        _recovered_dates = {str(_d)[:10] for _d, _ in recovered}
+        gaps = [d for d in gaps if d not in _recovered_dates]
+        # 立刻落盘：这一步不花 GPU，先把缺口闭掉，即使后面推理被杀也不会重来
+        _flush_pred()
+
+    # ── 防线 1：单轮真实推理天数上限 ──────────────────────────────────────
+    # compute_coverage 的 quantdb_fallback 分支在 pred.parquet 缺失时，会把
+    # QuantDB 首个可用日之后的**全部**交易日都当成缺口（可达数百天）。
+    # 一次点击/一轮 Beat 就打数百次全量推理，是最容易失控的入口。
+    # 超出部分保留缺口，交给后续轮询继续推进（Beat 每 30 分钟一轮）。
+    _max_days = max(1, int(os.getenv("INFERENCE_BACKFILL_MAX_DAYS_PER_RUN", "30")))
+    gap_requested = len(gaps) + rebuilt
+    capped = len(gaps) > _max_days
+    if capped:
+        logs.append(
+            f"待推理 {len(gaps)} 日，本轮最多补 {_max_days} 日（最旧优先），"
+            f"剩余 {len(gaps) - _max_days} 日留给后续轮次"
+        )
+        gaps = gaps[:_max_days]
 
     try:
         for idx, d in enumerate(gaps):
@@ -521,36 +614,43 @@ async def backfill_model_gaps(
                 failed += 1
                 logs.append(f"{d} 失败: {exc}")
                 logger.warning("backfill %s %s failed: %s", model_id, d, exc)
+            # 分批落盘：每完成 N 日就把分数写进 pred.parquet，进程随后被杀也不会
+            # 作废已推理的日期（缺口一旦闭合，下一轮就不会再重推）。
+            if (idx + 1) % _merge_every == 0:
+                _flush_pred()
             _emit(progress=int((idx + 1) / len(gaps) * 100))
 
-        if pred_signals and parquet_file is not None:
-            try:
-                merged = merge_signals_into_pred(
-                    Path(parquet_file), pred_signals, create_if_missing=True
-                )
-                logs.append(
-                    f"pred.parquet 已合并 {merged} 行（{len(pred_signals)} 日）"
-                )
-            except Exception as exc:
-                logs.append(f"pred.parquet 合并失败: {exc}")
-                logger.warning(
-                    "backfill %s merge pred.parquet failed: %s", model_id, exc
-                )
+        # ── 防线 3：收尾合并，并把合并结果如实反映到状态里 ────────────────
+        # 旧行为是「合并失败只写一行日志，状态仍然 completed」，而下一轮的缺口
+        # 判定恰恰只看 parquet —— 等于把失败伪装成成功，循环就此形成。
+        _flush_pred()
 
-        if failed:
-            status = "partial" if appended > 0 else "failed"
-            error = (
-                f"{appended}/{len(gaps)} 日补全成功，{failed} 日失败："
-                + "; ".join(ln for ln in logs[-failed:] if "失败" in ln)[:500]
-            )
+        if failed or merge_error:
+            status = "partial" if (appended + rebuilt) > 0 else "failed"
+            parts = [
+                f"{appended}/{len(gaps)} 日新推理成功",
+                f"{rebuilt}/{len(gaps)} 日复用已落库分数",
+            ]
+            if failed:
+                parts.append(
+                    f"{failed} 日失败："
+                    + "; ".join(ln for ln in logs[-failed:] if "失败" in ln)[:300]
+                )
+            if merge_error:
+                parts.append(merge_error[:300])
             out = {
                 "status": status,
                 "progress": 100,
                 "gap": len(gaps),
+                "gap_requested": gap_requested,
+                "capped": capped,
                 "appended": appended,
+                "rebuilt": rebuilt,
+                "merged_rows": merged_rows,
                 "failed": failed,
+                "merge_error": merge_error,
                 "logs": logs[-200:],
-                "error": error,
+                "error": "，".join(parts)[:1000],
                 "model_id": model_id,
             }
         else:
@@ -558,8 +658,13 @@ async def backfill_model_gaps(
                 "status": "completed",
                 "progress": 100,
                 "gap": len(gaps),
+                "gap_requested": gap_requested,
+                "capped": capped,
                 "appended": appended,
+                "rebuilt": rebuilt,
+                "merged_rows": merged_rows,
                 "failed": 0,
+                "merge_error": "",
                 "logs": logs[-200:],
                 "model_id": model_id,
             }
@@ -571,8 +676,12 @@ async def backfill_model_gaps(
             "status": "failed",
             "error": str(exc),
             "gap": len(gaps),
+            "gap_requested": gap_requested,
+            "capped": capped,
             "appended": appended,
+            "rebuilt": rebuilt,
             "failed": failed,
+            "merge_error": str(exc),
             "logs": logs[-200:],
             "model_id": model_id,
         }
@@ -680,6 +789,10 @@ async def backfill_all_default_models(
         "completed": 0,
         "partial": 0,
         "failed": 0,
+        # rebuilt: 复用已落库分数（未重复推理）的天数合计
+        "rebuilt": 0,
+        # capped: 因单轮补全天数上限被截断的模型数
+        "capped": 0,
         "details": [],
     }
     logger.info(
@@ -742,7 +855,17 @@ async def backfill_all_default_models(
         )
         detail["status"] = result.get("status")
         detail["appended"] = result.get("appended", 0)
+        # 复用了已落库分数的天数（不重复推理，只回写 parquet）
+        detail["rebuilt"] = result.get("rebuilt", 0)
+        # 单轮补全天数被上限截断（缺口仍在，下一轮继续）
+        detail["capped"] = result.get("capped", False)
+        detail["merge_error"] = result.get("merge_error") or ""
         detail["failed"] = result.get("failed", 0)
+        summary["rebuilt"] = int(summary.get("rebuilt", 0)) + int(
+            result.get("rebuilt", 0) or 0
+        )
+        if result.get("capped"):
+            summary["capped"] = int(summary.get("capped", 0)) + 1
         if result.get("error"):
             detail["error"] = result["error"]
         st = str(result.get("status") or "")
@@ -754,10 +877,13 @@ async def backfill_all_default_models(
             summary["failed"] += 1
         summary["details"].append(detail)
         logger.info(
-            "[DefaultInferenceBackfill] %s status=%s appended=%s failed=%s gap=%s",
+            "[DefaultInferenceBackfill] %s status=%s appended=%s rebuilt=%s "
+            "capped=%s failed=%s gap=%s",
             mid,
             detail["status"],
             detail.get("appended"),
+            detail.get("rebuilt"),
+            detail.get("capped"),
             detail.get("failed"),
             detail["gap"],
         )

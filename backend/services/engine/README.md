@@ -2,6 +2,38 @@
 
 本服务是 QuantMind 的核心计算中枢，整合了 AI 策略生成、模型推理、高性能 Qlib 回测及深度投研分析功能。
 
+## 修复记录（2026-11-24，自动推理重复落库导致 PG 膨胀）
+
+客户反馈「系统反复推理，数据库几十 GB」。定位为四件事叠加的自激循环，全部在推理/补全链路修复：
+
+1. **缺口判定只看 `pred.parquet`，而落库先于合并**：`script_runner.execute()` 先
+   `_persist_and_publish`（commit），`gap_backfill` 要等整个 for 循环跑完才在循环外
+   调一次 `merge_signals_into_pred`，且异常只 `logs.append`、状态照样 `completed`。
+   worker 被 OOM 杀掉 / 合并抛异常 → 缺口永不闭合 → Beat（工作日 6-16 点每 30 分钟）
+   反复重推同一批日期。线上实测 2026-09-25 一轮就留下 49 个 run / 24.6 万行候选快照。
+2. **`run_id` 每次执行都是新 UUID，唯一键含 `run_id`**，跨 run 删除又已被移除，
+   于是「重推同一天」是净新增整份全市场截面（两张表 + 索引，约 15 MB/轮）。
+3. **保留期清理条件绑死 `model_version='inference_script' + 本次 `feature_version`**，
+   且默认 730 天（注释/README 写的是 30 天）：换过一次模型，旧 feature_version 的整块
+   历史就再也没有删除路径；`/runs/{run_id}/signal-ready` 用调用方传入的版本落库同样永不清理。
+4. **`qm_research_candidate_snapshot` 完全没有时间维度清理**，只增不减。
+
+修复：
+
+- `inference/backfill_guard.py`（新增）：补全前按 `(tenant, user, model_id, data_trade_date)`
+  查已落库分数，命中的日期**不再重复推理**，直接把分数回写 `pred.parquet` 闭合缺口。
+- `inference/gap_backfill.py`：分批落盘（`INFERENCE_BACKFILL_MERGE_EVERY_DAYS`）、
+  单轮真实推理天数上限（`INFERENCE_BACKFILL_MAX_DAYS_PER_RUN`）、合并失败/返回 0 行
+  一律降级为 `partial`/`failed` 并回传 `merge_error`；`quantdb_fallback` 分支的
+  `is_up_to_date` 改为与 `gap_dates` 同口径。
+- `inference/script_runner.py`：保留期默认 365 天且清理条件去掉 model/feature 版本绑定
+  （三张表都按 `tenant + user + 日期` 清，并保护本轮刚写入的历史日），
+  新增单日并存 run 数硬上限 `INFERENCE_MAX_RUNS_PER_PREDICTION_DAY`。
+- `services/signal_storage_janitor.py` + `engine.tasks.purge_inference_signal_storage`
+  （每日 03:40）：兜底清理不再被推理的用户/模型留下的存量与调度留痕。
+- `backend/scripts/cleanup_inference_signal_bloat.py`：一次性收敛存量脏数据（默认 dry-run）。
+- 回归护栏：`backend/tests/test_inference_backfill_leak_guard.py`。
+
 ## 修复记录（2026-03-27，自动推理任务稳定性）
 - 修复 `InferenceScriptRunner._query_dimension_readiness` 的 `SessionLocal` 未定义异常，消除
   `NameError: name 'SessionLocal' is not defined`。
@@ -84,6 +116,12 @@ API 进程仅负责入队或同步请求处理，不再保留 `BackgroundTasks` 
 窗口上界必须晚于上游因子分区落盘时刻（实测约次日 12:00-14:00），否则每轮都判定无缺口并 `skipped`，推理恒滞后一个交易日。
 生产部署必须同时运行 `celery-worker` 与 `celery-beat`；仅启动 worker 不会触发定时自动推理。
 如需因硬件压力临时暂停自动推理，可在运行环境设置 `AUTO_INFERENCE_ENABLED=false`（仅关闭 Beat 定时调度，不影响手动触发）。
+补全链路自带四道膨胀防线（历史事故：`pred.parquet` 缺口不闭合 → 每 30 分钟重推同一批日期 → 客户库涨到几十 GB，详见 `backend/services/engine/inference/README.md`「数据保留与膨胀防线」）：
+1. **缺口判定先看落库分数**（`inference/backfill_guard.py`）：某天在 `qm_research_candidate_snapshot` 已有足量分数时不再重复推理，直接把已落库分数回写 `pred.parquet` 闭合缺口；
+2. **单轮补全天数上限** `INFERENCE_BACKFILL_MAX_DAYS_PER_RUN`（默认 30 日）与**分批落盘** `INFERENCE_BACKFILL_MERGE_EVERY_DAYS`（默认 5 日一合），worker 被 OOM 杀掉不再作废本轮全部推理；
+3. **合并失败不再伪装成功**：`pred.parquet` 写失败/返回 0 行 → 状态 `partial`/`failed`，调度留痕 `reason_code=PRED_MERGE_FAILED`，管理台「推理监控」可见；
+4. **单日并存 run 上限** `INFERENCE_MAX_RUNS_PER_PREDICTION_DAY`（默认 6）：`engine_signal_scores` 唯一键含 `run_id`，重推同一天是净新增，超限从最旧淘汰（含快照、feature_runs、推理历史行）。
+另有每日 03:40 的 `engine.tasks.purge_inference_signal_storage` 兜底清理不再被推理的用户/模型存量；一次性收敛用 `python backend/scripts/cleanup_inference_signal_bloat.py`（默认 dry-run）。
 推理链路已升级为“多用户模型解析”：
 - 解析优先级：`显式 model_id > 策略绑定 > 用户默认`
 - 用户模型目录：`models/users/{tenant_id}/{user_id}/{model_id}`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
@@ -31,9 +32,10 @@ MAX_RANGE_TRADING_DAYS = 300
 MAX_CONCURRENCY = 5
 
 # script_runner 按 prediction_day - INFERENCE_PREDICTION_RETENTION_DAYS 清理
-# engine_signal_scores 历史行（默认 730 天）。窗口跨度超过它时，最早几天的信号会
-# 在后续单日推理运行时被删掉，聚合结果会静默缺日 —— 必须提前警告。
-PREDICTION_RETENTION_DAYS = 730
+# engine_signal_scores 历史行（默认 365 天，与 script_runner 同一 env，不再各写一套）。
+# 窗口跨度超过它时，最早几天的信号会在后续单日推理运行时被删掉，聚合结果会静默缺日
+# —— 必须提前警告。
+PREDICTION_RETENTION_DAYS = int(os.getenv("INFERENCE_PREDICTION_RETENTION_DAYS", "365"))
 
 
 class BatchInferenceOrchestrator:
