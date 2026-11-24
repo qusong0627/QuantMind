@@ -551,6 +551,7 @@ class SimulationEngine:
                     # 持仓少于 topk：本轮是补仓轮（止损/风控清掉的仓位），
                     # 单轮上限必须跟着缺口放开，否则每次只能补 20 只。
                     is_refill=0 < len(position_symbols) < strategy_topk,
+                    held_count=len(position_symbols),
                 )
                 if effective_max_orders > 0:
                     orders = self._truncate_orders(orders, effective_max_orders)
@@ -1293,6 +1294,7 @@ class SimulationEngine:
         topk: int,
         is_build: bool,
         is_refill: bool = False,
+        held_count: int = 0,
     ) -> int:
         """解析本轮实际使用的单轮订单上限；返回 0 表示不截断。
 
@@ -1304,8 +1306,9 @@ class SimulationEngine:
 
         补仓轮（持仓数 < topk，例如被 -8% 止损逐日清掉一部分）同理：缺口
         一次性补不回来，止损会继续跑赢补仓，账户最终只剩现金。因此建仓/补仓
-        轮都把上限抬到 topk（用户显式设得更大则保留）；其余日常调仓仍严格
-        按配置截断，保留限流风控语义。
+        轮把上限抬到「topk + 当前持仓数」（卖单同样占用单轮额度，见
+        _truncate_orders）；用户显式设得更大则保留。其余日常调仓仍严格按配置
+        截断，保留限流风控语义。
         """
         try:
             limit = int(max_orders or 0)
@@ -1313,14 +1316,22 @@ class SimulationEngine:
             limit = 0
         if limit <= 0:
             return 0
-        if (is_build or is_refill) and topk > limit:
+        if not (is_build or is_refill):
+            return limit
+        # 卖单与买单共享同一额度：补仓轮要「卖出旧持仓 + 补满 topk」都能下发，
+        # 额度取 topk + 持仓数（建仓轮持仓为 0，退化为 topk）。
+        needed = max(1, int(topk or 0)) + max(0, int(held_count or 0))
+        if needed > limit:
             logger.info(
-                "SimulationEngine: %s单轮上限 %d → topk=%d（否则账户会永久少配）",
+                "SimulationEngine: %s单轮上限 %d → %d（topk=%d + 持仓=%d，"
+                "否则账户会永久少配）",
                 "建仓轮" if is_build else "补仓轮",
                 limit,
+                needed,
                 topk,
+                held_count,
             )
-            return topk
+            return needed
         return limit
 
     @staticmethod
