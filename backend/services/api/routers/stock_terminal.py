@@ -185,7 +185,9 @@ def _rebuild_universe(asof: str | None) -> tuple[pd.DataFrame, str]:
 
     detail_cols = [
         "Symbol", "Name", "rs_hyname", "Zsz", "Ltsz", "DynaPE", "PB_MRQ",
-        "StaffNum", "MainBusiness", "IPO_Price", "ZTPrice", "DTPrice",
+        # 员工人数：QuantDB 新版 instrument_list.parquet 叫 emp_num，
+        # 旧版 instrument_detail.parquet 叫 StaffNum，两个都保留（缺失的会被 keep 过滤）。
+        "emp_num", "StaffNum", "MainBusiness", "IPO_Price", "ZTPrice", "DTPrice",
         "RZRQ", "HSGT", "STGP", "IsSTGP", "IsHKGP", "J_zgb", "FreeLtgb", "BetaValue",
         "BelongHS300",
     ]
@@ -2125,7 +2127,10 @@ async def stock_profile(
         "pb": _safe_f(r.get("PB_MRQ")),
         "dividend_yield": dividend_yield,
         "beta": _safe_f(r.get("BetaValue")),
-        "staff_num": _safe_f(r.get("StaffNum")),
+        # 员工人数（QuantDB emp_num；旧版 parquet 字段名为 StaffNum）
+        "staff_num": _safe_f(
+            r.get("emp_num") if r.get("emp_num") is not None else r.get("StaffNum")
+        ),
         "main_business": _g("MainBusiness"),
         "ipo_price": _safe_f(r.get("IPO_Price")),
         "limit_up_price": _safe_f(r.get("ZTPrice")),
