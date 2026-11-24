@@ -224,6 +224,15 @@ if MODEL_SIGNAL_EVAL_ENABLED:
         "kwargs": {"max_models": 8, "window_days": 63},
     }
 
+# 机构择时 v2 影子盘（2026-11-24）：17:10 盘后重建市场面板 + MLP/TFT 聚合分，
+# 写 /data/market_timing_v2/latest.json；只读，不碰交易。晚于 16:50 的模型体检，
+# 避免盘后同一分钟挤两个重任务。
+if os.getenv("MARKET_TIMING_V2_ENABLED", "true").lower() == "true":
+    beat_schedule["market-timing-v2-snapshot"] = {
+        "task": "engine.tasks.market_timing_v2_snapshot",
+        "schedule": crontab(minute="10", hour="17", day_of_week="1-5"),
+    }
+
 # 天风 50 因子日频物化：数据同步时间由用户在前端配置（常见次日 00:00 后），
 # 所以这里给 06:30/07:30/08:30/09:30 四个幂等重试点——脚本先查库内最大 dt，
 # 已是最新就秒退；同步晚到也能在盘中前补上。引擎在
@@ -476,6 +485,7 @@ celery_app.conf.update(
         "backend.services.engine.qlib_app.tasks",
         "backend.services.engine.tasks.celery_tasks",
         "backend.services.engine.tasks.model_signal_eval_tasks",
+        "backend.services.engine.tasks.market_timing_v2_tasks",
     ),
     # 监控配置
     worker_send_task_events=True,

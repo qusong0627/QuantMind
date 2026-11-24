@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 from . import flow_panorama, flow_predictive, flow_probability, quantdb_feed, sector_direction, volume_profile, quantdb_snapshot as _snap
 from . import sentiment as _sentiment
 from . import smart_money as _sm
+from . import timing_v2 as _timing_v2
 from .domain import SectorConflictError, SectorNotFoundError
 from .repository import MarketAnalysisRepository
 from .schemas import (
@@ -48,6 +49,7 @@ router = APIRouter(prefix="/api/v1/market-analysis", tags=["Market Analysis"])
 from . import regime as _regime  # noqa: E402
 
 router.include_router(_regime.router)
+router.include_router(_timing_v2.router)
 
 
 @router.get("/realtime/snapshots")

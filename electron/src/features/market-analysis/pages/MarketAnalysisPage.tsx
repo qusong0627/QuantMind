@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Activity, Network, Clock, RefreshCw, Zap, Radar, Gauge } from 'lucide-react';
+import { Sparkles, Activity, Network, Clock, RefreshCw, Zap, Radar, Gauge, Crosshair } from 'lucide-react';
 import { DatePicker, message } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import dayjs from 'dayjs';
 import type { IndexItem } from '../components/BroadMarketHeader';
 import { MarketSentimentPanel } from '../components/MarketSentimentPanel';
 import { MarketRegimePanel } from '../components/MarketRegimePanel';
+import { MarketTimingV2Panel } from '../components/MarketTimingV2Panel';
 import { MarketPanoramaPanel } from '../components/panorama/MarketPanoramaPanel';
 import { StockTerminalSearchBox } from '../../market-analysis-shared/components/StockTerminalSearchBox';
 import { StockTerminalWindow } from '../../market-analysis-shared/components/StockTerminalWindow';
@@ -255,6 +256,7 @@ export const MarketAnalysisPage: React.FC = () => {
 
   const navTabs = [
     { id: 'panorama', label: '大盘全景看板', icon: Activity },
+    { id: 'timing-v2', label: '机构择时', icon: Crosshair },
     { id: 'regime', label: '市场阶段', icon: Gauge },
     { id: 'sentiment', label: '大盘情绪', icon: Gauge },
     { id: 'flow-panorama', label: '资金流全景', icon: Network },
@@ -409,6 +411,8 @@ export const MarketAnalysisPage: React.FC = () => {
               onOpenStock={(symbol) => setWindowSymbol(symbol)}
             />
           )}
+
+          {activeTab === 'timing-v2' && <MarketTimingV2Panel />}
 
           {activeTab === 'regime' && (
             <MarketRegimePanel onOpenStock={(s) => setWindowSymbol(s)} />
