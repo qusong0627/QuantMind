@@ -33,9 +33,9 @@ Web 端是 **HashRouter**：`http://<服务器IP>:3080/#/路由`；Electron 桌�
 | **回测中心** | 回测中心 | 无独立路由（主控制台 `#/` 内切换 tab） | Qlib 快速/专家回测、策略对比、参数优化、回测历史、高级分析；另含**行情回测**（A股/港股/美股/期货/加密，日线/5分钟/1分钟，单标的与自定义/指数池批量，内置模板 + Pine 策略库） | [[backtest-center]] |
 | **模拟交易** | 模拟交易 | `#/trading` | 模拟盘下单、持仓、委托/成交、资金曲线、T+1 撮合与风控；实盘栏目存在时本栏目固定为模拟盘 | [[simulation-trading]] |
 | **实盘交易** | 实盘交易（默认不出现） | `#/live`（深链会落到说明页） | QMT / 通达信 / IBKR 等真实通道；**开源版默认关闭**：后端 `ENABLE_REAL_TRADING` + 前端 `VITE_ENABLE_REAL_TRADING` 都开才显示 | [[qmt-bridge-ops]]、[[tdx-live-trading]]、[[ibkr-cli]] |
-| **模型训练** | 模型训练 | `#/model-training` | 13 种模型（LightGBM/XGBoost/CatBoost/GRU/LSTM/ALSTM/Transformer/TabNet/TCN/NativeTFT 等）、Optuna 调参、WFA、本地 CPU/GPU 与 AutoDL 远程节点 | [[model-train-infer-backtest-report]]、[[factor-train-pipeline]] |
-| **模型管理** | 模型管理 | `#/model-registry` | 模型台账、默认模型、A/B 对比、SHAP、漂移 PSI、滚动训练/月度重训、归档与恢复、推理覆盖 | [[model-inference-backfill]]、[[batch-inference-analysis]] |
-| **推理中心** | 推理中心 | `#/inference-center` | 全市场批量截面打分、Top-N 信号、组合选股（同市场同周期模型截面加权重合）、推理补推、模型滚动 | [[batch-inference-analysis]]、[[model-inference-backfill]]、[[model-portfolio-sim]] |
+| **模型训练** | 模型训练 | `#/model-training` | 13 种模型（LightGBM/XGBoost/CatBoost/GRU/LSTM/ALSTM/Transformer/TabNet/TCN/NativeTFT 等）、Target Contract 目标注册表与能力硬闸、Optuna 调参、WFA、本地 CPU/GPU 与 AutoDL 远程节点 | [[model-train-infer-backtest-report]]、[[factor-train-pipeline]] |
+| **模型管理** | 模型管理 | `#/model-registry` | 模型台账、默认模型、A/B 对比、SHAP、漂移 PSI、滚动训练/月度重训、归档与恢复、推理覆盖；模型 metadata 带 target_id/version/hash | [[model-inference-backfill]]、[[batch-inference-analysis]] |
+| **推理中心** | 推理中心 | `#/inference-center` | 全市场批量截面打分、Top-N 信号、组合选股（同市场同周期模型截面加权重合）、推理补推、模型滚动；横评按 target_hash 分组 | [[batch-inference-analysis]]、[[model-inference-backfill]]、[[model-portfolio-sim]] |
 | **投研平台** | 投研平台 | `#/research` | 个股/行业深度投研、研报档案、每日复盘、候选池与研究工作区 | [[stock-research]]、[[daily-review]]、[[stock-picks]] |
 | **因子挖掘** | 因子挖掘 | `#/alpha-research` | RD-Agent / LLM 因子演化、因子工厂、通达信指标量化、候选因子表达式与回测优选 | [[rd-agent-factor-mining]]、[[factor-materialize-catalog]] |
 | **因子研究** | 因子研究 | `#/factor-research` | 因子 IC/Fitness 排行、正交化、分层、回测偏差审计（PBO/DSR/前视/成本）、物化与跨库训练载荷 | [[factor-materialize-catalog]]、[[factor-ic-decay]]、[[factor-orthogonalization]]、[[factor-quality-audit]]、[[backtesting-bias-avoidance]] |

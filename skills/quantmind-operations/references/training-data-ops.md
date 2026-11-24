@@ -57,8 +57,17 @@ run-training → submit_training_job → LocalDockerOrchestrator
 
 > `hybrid_gru_tree` 已剔除（QLIB map 无实现）；以 `backend/shared/training/request.py::ALLOWED_MODEL_TYPES` 为准。
 
+### Target Contract（2026-11-24 起）
+
+- 目标定义在 `qm_label_targets`（版本不可变 + sha256）；内置 6 个 CN 目标（`cn_ret_1d_open_rank` / `cn_ret_5d_open_rank` / `cn_ret_5d_open_raw` / `cn_ret_5d_open_top20` / `cn_updown_5d_open` / `cn_ret_5d_open_quantile`）。
+- 请求首选 `target_ref: {id, version}` + 白名单 `label_overrides`；重训复现再加 `expected_target_hash`（hash 漂移 422）。
+- 只读：`GET /api/v1/models/training/capabilities`、`/training/targets?market=CN&status=active`；管理端 create/activate/deprecate 在 `/api/v1/admin/models/training/targets`。
+- 能力硬闸：classification 仅 6 个非 DL；quantile 仅 CN 单 LightGBM；排序损失仅三棵 GBDT；sample_weight 支持 lgb/xgb/cat/linear/rf；open 价需直读因子源；`size_excess_*` 需 `total_cap`。
+- 无 `target_ref` 的旧请求走 legacy 平铺字段，config 键集合与训练行为不变；metadata 记 `target_id=legacy` + 合成 hash。
+- 完整矩阵/错误码见 `docs/训练目标契约_使用说明_20261124.md`。
+
 **集成法**：none / stacking / blending / voting
-**参数**：features(≤300)、target_horizon_days(1-30)、target_mode(return/classification)、lgb/xgb/catboost/dl_params、wfa（walk-forward）
+**参数**：features(≤300)、`target_ref`+`label_overrides`（或 legacy `target_horizon_days`/`target_mode`/`label_transform`）、lgb/xgb/catboost/dl_params、wfa（walk-forward）
 > 已下线/死配置：`horizons`（多周期，2026-09 清理）、`optuna`、`n_folds`（不参与序列化）。
 
 ### 关键 payload 字段
@@ -69,14 +78,18 @@ run-training → submit_training_job → LocalDockerOrchestrator
 | `model_types` | — | 多模型列表（ensemble 用） |
 | `ensemble` | none | none/stacking/blending/voting |
 | `features` | [] | 特征 key 列表（从 feature-catalog 取，≤300） |
-| `target_horizon_days` | 1 | 预测 horizon |
-| `target_mode` | return | return / classification |
+| `target_ref` | — | `{id, version}`；注册表目标（新路径） |
+| `label_overrides` | — | 按 family 白名单覆盖（horizon_days/label_transform/...） |
+| `expected_target_hash` | — | 重训复现凭证；覆盖后 hash 必须一致 |
+| `target_horizon_days` | 1 | legacy / 派生平铺字段（registry 时由 spec 覆盖） |
+| `target_mode` | return | legacy / 派生平铺字段（registry 时由 spec 覆盖） |
 | `optuna` | — | Optuna 超参搜索配置 |
 | `context` | — | {initial_capital, benchmark, commission_rate, slippage, deal_price, market, industry_as_feature} |
 
 ## 模型注册表
 
 - **表**：`qm_user_models`（status: candidate/syncing/ready/active/archived/failed, metadata_json, metrics_json, is_default）
+- **Target Contract metadata**：`target_id/target_version/target_hash/target_base_hash/target_overrides/target_spec/label_contract_version/label_stats/contract_flags`；横评/成绩单按 `target_hash` 分组，不同 hash 不可直接比较。
 - **用户模型**：`/api/v1/models`（用户态 CRUD）
 - **市场分段**：model_id=`mdl_{market_lower}_{run}_{digest}`，非CN存 `models/users/{tenant}/{user}/{market_lower}/`，market∈CN/a_share、HK、US、CRYPTO、FUTURES
 - **系统模型回退**：系统内置 `model_qlib/alpha158` 已废弃，不再有隐式回退

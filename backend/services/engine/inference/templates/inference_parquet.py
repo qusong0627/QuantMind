@@ -868,6 +868,15 @@ def main():
         logger.info("  market    : %s (CLI 注入)", args.market)
     logger.info("  run_id    : %s", meta.get("run_id", "unknown"))
     logger.info("  features  : %d", len(meta.get("feature_columns") or meta.get("features", [])))
+    # Target Contract 追溯：只读 metadata，不改变推理口径；legacy 模型显示合成/缺省。
+    logger.info(
+        "  target    : id=%s version=%s hash=%s contract=%s legacy=%s",
+        meta.get("target_id") or "legacy",
+        meta.get("target_version") or 0,
+        str(meta.get("target_hash") or "")[:12] or "-",
+        meta.get("label_contract_version") or "-",
+        not bool(meta.get("target_id")),
+    )
 
     # 2. 加载数据（日期不存在 → exit 2 触发兜底）
     day_df = load_date_data(trade_date, data_dir, meta)

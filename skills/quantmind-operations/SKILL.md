@@ -24,6 +24,43 @@ description: "QuantMind 平台运营操作技能 — 覆盖模型训练、模型
 
 QuantMind 量化平台的完整运营操作指南。所有 API 都通过 API 网关（默认 `http://127.0.0.1:8000` 或 `http://192.0.2.68:3080`）访问，统一加 `/api/v1` 前缀。
 
+## Target Contract（训练目标契约，2026-11-24 起）
+
+训练目标不再是散落的平铺字段，而是注册表里版本不可变的 `LabelTargetSpec`。提交训练时：
+
+- 首选：`target_ref: {"id": "cn_ret_5d_open_rank", "version": 1}`；
+- 允许覆盖：`label_overrides`（forward_return: `horizon_days` / `label_transform` / `label_top_pct` / `label_drop_extreme_pct`；classification: 仅 `horizon_days`；quantile: 无）；
+- 重训复现：再加 `expected_target_hash`（原模型 metadata 的 `target_hash`）；覆盖后 hash 不一致 → 422 `target_hash_drift`；deprecated 目标只在此凭证下放行；
+- 旧请求不带 `target_ref` 仍走 legacy 平铺字段，config 键集合与训练行为不变。
+
+只读接口：
+```bash
+GET /api/v1/models/training/capabilities
+GET /api/v1/models/training/targets?market=CN&status=active
+GET /api/v1/models/training/targets/{id}/{version}
+```
+管理端：`POST /api/v1/admin/models/training/targets` + `/{id}/{version}/activate|deprecate`。
+
+13 模型目标能力（提交/编排/容器三层硬闸）：
+- classification：仅 lightgbm / xgboost / catboost / linear / random_forest / mlp；7 个 DL（gru/lstm/alstm/transformer/tcn/tabnet/nativetft）→ 422；
+- quantile：仅 CN + 单 LightGBM + return；
+- 排序损失：仅 lightgbm/xgboost/catboost（单模型）；
+- sample_weight：lightgbm/xgboost/catboost/linear/random_forest；mlp/DL → 422；
+- `execution_price=open` 必须有直读 QuantDB `factor_source`；`size_excess_*` 必须含 `total_cap`；
+- classification 不允许 transform/drop_extreme；quantile 必须 raw。
+
+容器侧标签诊断（训练前失败）：NaN>50% `target_label_incomplete`、分类正类率<1%/>99% `target_label_degenerate`、每日截面<50 `target_label_cross_section_too_small`、top-tail 实际比例偏离>50% `target_label_tail_unstable`；test 尾部不完整仅 warning。
+
+模型 metadata 新增：`target_id/target_version/target_hash/target_base_hash/target_overrides/target_spec/label_contract_version/label_stats/contract_flags`。推理、成绩单、横评按 `target_hash` 分组；不同 hash 不可直接比较。legacy 模型 metadata 为 `target_id=legacy` + 合成 hash。
+
+常见错误码：`target_not_found`、`target_deprecated`、`target_market_mismatch`、`target_override_not_allowed`、`target_capability_unsupported`、`target_objective_conflict`、`target_hash_drift`、`target_spec_hash_mismatch`、`target_spec_field_mismatch`、`target_label_*`。完整说明见 `docs/训练目标契约_使用说明_20261124.md`。
+
+### Target Contract 下改周期 / 改口径
+
+- 源 payload 带 `target_ref`：不要直接改 `target_horizon_days`（会被 spec 覆盖）。应加 `label_overrides={"horizon_days": 3}`；若是全新训练而非复现，删除 `expected_target_hash`。
+- 源 payload 无 `target_ref`（legacy）：直接改平铺字段即可，行为与旧版一致。
+- 复现原模型：保留 `target_ref` + 原训练 `label_overrides` + `expected_target_hash`；三者一致才通过 `target_hash_drift` 校验。
+
 ## 认证
 
 所有请求需要 Bearer Token：
@@ -60,12 +97,13 @@ curl -s -H "$AUTH" "$BASE/api/v1/admin/models/feature-catalog"
 选择特征 key 列表（如 `["mom_ret_5d", "vol_std_20"]`）或按类别（`feature_categories`）。
 特征类别由后端特征目录**动态生成**，随 QuantDB `l1_factors` 数据版本变化（示例 version `20260831` 返回 10 类 110 特征：`momentum` / `fundamental` / `money_flow` / `style` / `technical` / `turnover` / `concept` / `volatility` / `chip` / `industry`）。**先读接口返回的 `categories[].id`，不要硬编码类别清单。**
 
-### 1.2 训练目标（定义 T+N 标签口径）
-- `target_horizon_days`：预测周期（T+1 / T+5 / T+20 等）
-- `target_mode`：`regression`（回归）或 `classification`（分类）
-- `label_formula`：标签计算公式（如 `close_future/close - 1`）
-- `effective_trade_date`：生效交易日
-- `training_window`：训练窗口（如 `rolling`）
+### 1.2 训练目标（Target Contract，2026-11-24 起）
+- **首选**：`target_ref: {"id": "cn_ret_5d_open_rank", "version": 1}` + 可选 `label_overrides`；目标口径由注册表冻结（`qm_label_targets`），容器重算 hash 后训练。
+- **重训复现**：再带 `expected_target_hash`（原模型 metadata 的 `target_hash`）；覆盖后 hash 不一致 → 422 `target_hash_drift`。
+- **legacy**（不带 `target_ref`）：`target_horizon_days`（1–30）、`target_mode`（`return` / `classification`）、`execution_price`（`open`/`close`）、`label_transform`（rank/zscore/raw/top_tail/size_excess_*）、`label_top_pct`、`label_drop_extreme_pct`。
+- `label_formula` 已降级为 legacy 覆盖通道；带 `target_ref` 时禁止含 `=`（422 `target_formula_override_forbidden`）。
+- 只读接口：`GET /api/v1/models/training/capabilities`、`GET /api/v1/models/training/targets?market=CN&status=active`。
+- 能力硬闸：分类×7 个 DL、quantile×非单 LGB、排序损失×非树、sample_weight×mlp/DL 一律 422；`size_excess_*` 需 `total_cap`，`execution_price=open` 需直读因子源。
 
 ### 1.3 参数配置（设置超参与训练上下文）
 - **时间划分**：`train_start/end`、`valid_start/end`、`test_start/end`、`val_ratio`
@@ -91,9 +129,8 @@ curl -s -X POST "$BASE/api/v1/models/run-training" -H "$AUTH" -H "$CT" -d '{
   "early_stopping_rounds": 100,
   "features": ["mom_ret_5d", "vol_std_20"],
   "feature_categories": ["momentum", "volatility"],
-  "target_horizon_days": 1,
-  "target_mode": "regression",
-  "label_formula": "close_future/close - 1",
+  "target_ref": {"id": "cn_ret_5d_open_rank", "version": 1},
+  "label_overrides": {"horizon_days": 1},
   "effective_trade_date": "2025-01-02",
   "training_window": "rolling",
   "context": {"initial_capital": 1000000, "benchmark": "000300.SH", "commission_rate": 0.0003, "slippage": 0.001, "deal_price": "close", "market": "CN", "industry_as_feature": false},

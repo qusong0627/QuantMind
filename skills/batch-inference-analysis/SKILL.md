@@ -24,6 +24,16 @@ description: "批量推理结果分析 — 用 QuantMind 选股策略方法论�
 
 基于 QuantMind 选股策略方法论，分析批量推理产出的每日信号，做出入场/选股/买卖/做空决策。
 
+## 推理侧 Target Contract（2026-11-24 起）
+
+- 模型目录 `metadata.json` 新增 `target_id/target_version/target_hash/target_base_hash/target_overrides/target_spec/label_contract_version/label_stats/contract_flags`；推理/回填只读模型目录，不重算训练目标。
+- 分类模型推理输出正类概率（LightGBM/XGBoost 的 binary objective `predict`、CatBoost `predict_proba[:,1]`、sklearn `predict_proba[:,1]`）；DL 分类训练已被禁止，不要按分类模型消费 `.pth`。
+- 成绩单、横评、组合回测按 `target_hash` 分组：**不同 target_hash 的模型不可合并比较**（持有期/标签口径可能不同）；没有该字段的老模型按 `target_id=legacy` + 合成 hash 处理。
+- `target_mode` / `target_horizon_days` 仍保留在 metadata 供旧推理模板读取；新代码优先用 `target_id/target_hash/target_spec` 追溯口径。
+- 若推理结果异常，先核对 `metadata.label_contract_version` 与 `contract_flags`（`capability_gate` / `diagnostic_gate`），再查 `label_stats` 的 NaN/正类率/每日截面。
+
+说明：`docs/训练目标契约_使用说明_20261124.md`。
+
 ## 数据基础
 
 批量推理产出：

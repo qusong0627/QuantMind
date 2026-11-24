@@ -36,6 +36,14 @@ python3 backend/scripts/select_training_features.py --n-target 200 --horizon 10 
 - `training_selection_300.json`（**唯一事实源**：`train_plan` + `features_payload` + 配额表 + 排除/冗余明细）
 - `训练选型报告_YYYYMMDD.md`（先给用户审阅漏斗/配额/各类 Top，再提交）
 
+## Target Contract（2026-11-24 起）
+
+- `train_plan.label` 可直接带 `target_ref: {id, version}` 与 `label_overrides`；`submit_crosslib_training.py` 会透传并用 `expected_target_hash`（若提供）校验复现。
+- 源计划带 `target_ref` 时改周期：改 `label.label_overrides={"horizon_days": N}`，不要只改 `label.target_horizon_days`（会被冻结 spec 覆盖）；新训练删除 `expected_target_hash`。
+- 源计划无 `target_ref`：继续 legacy 平铺字段，行为不变。
+- 回读断言新增：`label.target_id` / `label.target_version`（若计划带 ref）必须与计划一致；config 缺失 `target_id` 而计划带 ref → 没交付。
+- 能力硬闸：classification 不支持 7 个 DL；quantile 仅 CN 单 LightGBM；排序损失仅三棵 GBDT；`size_excess_*` 需 `total_cap`；`execution_price=open` 需直读因子源。完整矩阵见 `docs/训练目标契约_使用说明_20261124.md`。
+
 ## Step 2 · 提交（跨库）
 
 `train_plan` 里的 `job_name/display_name/model_type/split/label/context/num_boost_round/early_stopping_rounds/max_time_minutes` 按本轮需求改（默认 = T5_Cross300_LGB / lightgbm / 2000 轮 / 早停 100 / 720 分钟）。

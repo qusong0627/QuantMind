@@ -51,6 +51,43 @@ description: "模型训练-推理-组合回测-专业报告 全流程 — 提交
    └─ 回测数据 → 研报级 MD → md_to_pdf_report.py → PDF
 ```
 
+## Target Contract（训练目标契约，2026-11-24 起）
+
+训练目标不再是散落的平铺字段，而是注册表里版本不可变的 `LabelTargetSpec`。提交训练时：
+
+- 首选：`target_ref: {"id": "cn_ret_5d_open_rank", "version": 1}`；
+- 允许覆盖：`label_overrides`（forward_return: `horizon_days` / `label_transform` / `label_top_pct` / `label_drop_extreme_pct`；classification: 仅 `horizon_days`；quantile: 无）；
+- 重训复现：再加 `expected_target_hash`（原模型 metadata 的 `target_hash`）；覆盖后 hash 不一致 → 422 `target_hash_drift`；deprecated 目标只在此凭证下放行；
+- 旧请求不带 `target_ref` 仍走 legacy 平铺字段，config 键集合与训练行为不变。
+
+只读接口：
+```bash
+GET /api/v1/models/training/capabilities
+GET /api/v1/models/training/targets?market=CN&status=active
+GET /api/v1/models/training/targets/{id}/{version}
+```
+管理端：`POST /api/v1/admin/models/training/targets` + `/{id}/{version}/activate|deprecate`。
+
+13 模型目标能力（提交/编排/容器三层硬闸）：
+- classification：仅 lightgbm / xgboost / catboost / linear / random_forest / mlp；7 个 DL（gru/lstm/alstm/transformer/tcn/tabnet/nativetft）→ 422；
+- quantile：仅 CN + 单 LightGBM + return；
+- 排序损失：仅 lightgbm/xgboost/catboost（单模型）；
+- sample_weight：lightgbm/xgboost/catboost/linear/random_forest；mlp/DL → 422；
+- `execution_price=open` 必须有直读 QuantDB `factor_source`；`size_excess_*` 必须含 `total_cap`；
+- classification 不允许 transform/drop_extreme；quantile 必须 raw。
+
+容器侧标签诊断（训练前失败）：NaN>50% `target_label_incomplete`、分类正类率<1%/>99% `target_label_degenerate`、每日截面<50 `target_label_cross_section_too_small`、top-tail 实际比例偏离>50% `target_label_tail_unstable`；test 尾部不完整仅 warning。
+
+模型 metadata 新增：`target_id/target_version/target_hash/target_base_hash/target_overrides/target_spec/label_contract_version/label_stats/contract_flags`。推理、成绩单、横评按 `target_hash` 分组；不同 hash 不可直接比较。legacy 模型 metadata 为 `target_id=legacy` + 合成 hash。
+
+常见错误码：`target_not_found`、`target_deprecated`、`target_market_mismatch`、`target_override_not_allowed`、`target_capability_unsupported`、`target_objective_conflict`、`target_hash_drift`、`target_spec_hash_mismatch`、`target_spec_field_mismatch`、`target_label_*`。完整说明见 `docs/训练目标契约_使用说明_20261124.md`。
+
+### Target Contract 下改周期 / 改口径
+
+- 源 payload 带 `target_ref`：不要直接改 `target_horizon_days`（会被 spec 覆盖）。应加 `label_overrides={"horizon_days": 3}`；若是全新训练而非复现，删除 `expected_target_hash`。
+- 源 payload 无 `target_ref`（legacy）：直接改平铺字段即可，行为与旧版一致。
+- 复现原模型：保留 `target_ref` + 原训练 `label_overrides` + `expected_target_hash`；三者一致才通过 `target_hash_drift` 校验。
+
 ## 认证
 
 ```bash
@@ -80,7 +117,7 @@ CT="Content-Type: application/json"
 
 ### 1.1 从现有模型复刻（推荐：保特征，只改周期）
 
-训练参数模型在 `admin_training_jobs.request_payload`。要训练 T+3 版本对比已有 T+5，**复制 T+5 的 payload 只改 target_horizon_days**，保证特征/时间/数据完全一致，只变量周期。
+训练参数模型在 `admin_training_jobs.request_payload`。要训练 T+3 版本对比已有 T+5，**复制 T+5 的 payload 并只改周期**，保证特征/时间/数据完全一致，只变周期。**Target Contract（2026-11-24 起）**：若源 payload 带 `target_ref`，不能直接改 `target_horizon_days`（会被冻结 spec 覆盖）；应设 `label_overrides={"horizon_days": 3}`，并在“新训练”场景删除 `expected_target_hash`。源 payload 无 `target_ref`（legacy）时才可直接改平铺字段。
 
 已有可复用脚本：`scripts/submit_t3_training.py`（从 T+5 复制改 T+3）
 
