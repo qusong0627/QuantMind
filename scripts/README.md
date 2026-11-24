@@ -80,6 +80,7 @@ python scripts/data/processing/merge_features_with_labels.py --years 2025 --forc
 - `scripts/ops/ci/p2_ci_quality_gate.py`: CI quality gate for isolation and smoke tests.
 - `scripts/ops/health_check.py`: General system health check.
 - `scripts/ops/db/cleanup_optimization_backtest_pollution.py`: One-time cleanup for optimization-generated sub-backtests accidentally mixed into normal backtest history (`dry-run` by default, add `--apply` to delete).
+- `scripts/verify_inference_leak_guard.py`: 自动推理膨胀防线只读验收（不写库、不推理）。逐项核对：默认模型缺口里有多少其实已落库可复用、A/B 两套数据（`engine_signal_scores`/候选快照 vs `pred.parquet`）背离的数据日、单日并存 run 分布是否触顶、超保留窗口的行数、调度留痕 `reason_code` 分布与治理索引就位情况。用法：`docker cp scripts/verify_inference_leak_guard.py quantmind:/tmp/ && docker exec quantmind python3 /tmp/verify_inference_leak_guard.py`。存量收敛另见 `backend/scripts/cleanup_inference_signal_bloat.py`（默认 dry-run）。
 - `scripts/db_init/add_api_keys_secret_ciphertext.sql`: 为 `api_keys` 表补充 `secret_ciphertext` 字段（幂等），用于“用户本人可见的最新私钥缓存”。
 - `scripts/postgres/research_candidate_incremental.sql`: 为投研平台建立 `qm_research_candidate_snapshot` 候选快照表，并提供基于 `qm_model_inference_runs + engine_signal_scores` 的增量导入函数；当 `stock_selection` 缺失时自动回退到 `stock_daily_latest`。
 
