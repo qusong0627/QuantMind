@@ -18,7 +18,17 @@ logger = logging.getLogger("quantmind.train")
 MAX_NAN_RATIO = 0.5
 MIN_POS_RATE = 0.01
 MAX_POS_RATE = 0.99
-MIN_DAILY_LABELED = 50
+#: 每日有效标签数下限按市场：CN/HK/US/CUSTOM 50；CRYPTO/FUTURES 标的天然少，
+#: 用更低的退化闸，避免把合法的小宇宙训练误杀。
+MIN_DAILY_LABELED_BY_MARKET = {
+    "CN": 50,
+    "HK": 50,
+    "US": 50,
+    "CUSTOM": 50,
+    "CRYPTO": 20,
+    "FUTURES": 10,
+}
+MIN_DAILY_LABELED = 50  # 向后兼容的默认（CN）
 TOP_TAIL_REL_TOL = 0.5
 
 
@@ -125,6 +135,7 @@ def enforce_label_diagnostics(
     target_mode: str,
     transform_type: str,
     gate_mode: str = "strict",
+    market: str = "CN",
 ) -> dict[str, Any]:
     """按诊断门判定；strict 失败抛错，warn 只记录，off 跳过。"""
     gate = str(gate_mode or "strict").strip().lower()
@@ -132,6 +143,7 @@ def enforce_label_diagnostics(
         gate = "strict"
     stats = dict(stats)
     stats["gate"] = gate
+    stats["market"] = str(market or "CN").strip().upper()
     if gate == "off":
         stats["warnings"] = list(stats.get("warnings") or [])
         return stats
@@ -154,11 +166,12 @@ def enforce_label_diagnostics(
                 )
             )
     daily_min = stats.get("daily_count_min")
-    if daily_min is not None and int(daily_min) < MIN_DAILY_LABELED:
+    min_daily = MIN_DAILY_LABELED_BY_MARKET.get(stats["market"], MIN_DAILY_LABELED)
+    if daily_min is not None and int(daily_min) < min_daily:
         violations.append(
             (
                 "target_label_cross_section_too_small",
-                f"每日有效标签数最小值 {daily_min} < {MIN_DAILY_LABELED}",
+                f"每日有效标签数最小值 {daily_min} < {min_daily}（market={stats['market']}）",
             )
         )
     if str(transform_type).lower() == "top_tail":

@@ -172,6 +172,9 @@ from data.loading import load_data
 # 评估/闸门需要的附加列（不参与主训练目标，只随 pred_df 落盘）。
 _EVAL_EXTRA_CANDIDATES = (
     "label_return",
+    # 可交易性过滤（次日开盘/收盘涨跌停）用的原始价，只进评估、不进特征
+    "open",
+    "close",
     "label_vol",
     "total_cap",
     "fun_total_mv",
@@ -1577,6 +1580,7 @@ def main() -> int:
                     target_mode=str(_label_cfg.get("target_mode") or "return"),
                     transform_type=str(_label_cfg.get("label_transform") or "rank"),
                     gate_mode=_diag_gate,
+                    market=market,
                 )
             except LabelDiagnosticError as exc:
                 raise RuntimeError(f"{exc.code}: {exc.message}") from exc

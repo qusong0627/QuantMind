@@ -86,6 +86,30 @@ def test_daily_cross_section_gate() -> None:
     assert exc.value.code == "target_label_cross_section_too_small"
 
 
+def test_daily_threshold_is_market_aware() -> None:
+    # FUTURES 阈值 10：20 个合约合法
+    futures = _stats(_frame(symbols=20))
+    out = enforce_label_diagnostics(
+        futures,
+        target_mode="return",
+        transform_type="rank",
+        gate_mode="strict",
+        market="FUTURES",
+    )
+    assert out["market"] == "FUTURES"
+    # CRYPTO 阈值 20：15 个标的应被拦
+    crypto = _stats(_frame(symbols=15))
+    with pytest.raises(LabelDiagnosticError) as exc:
+        enforce_label_diagnostics(
+            crypto,
+            target_mode="return",
+            transform_type="rank",
+            gate_mode="strict",
+            market="CRYPTO",
+        )
+    assert exc.value.code == "target_label_cross_section_too_small"
+
+
 def test_top_tail_instability_gate() -> None:
     frame = _frame(values=lambda k: 1.0 if k < 2 else 0.0)  # 实际 2/60≈3.3%
     stats = _stats(frame, transform_type="top_tail", top_pct=0.2)
