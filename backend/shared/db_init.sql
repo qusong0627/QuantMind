@@ -3721,6 +3721,158 @@ CREATE INDEX IF NOT EXISTS qm_inference_jobs_dispatch
     ON qm_inference_jobs (status,created_at,task_id);
 
 -- ========================
+-- T. 存储配额账本 + 企业版因子代次 + 报告归档（企业版下放）
+-- ========================
+-- 企业版 data/upgrade_v1.0.27（配额账本 4 表）+ upgrade_v1.0.28
+-- （replaced_bytes 列 + reserved 资源唯一索引）+ upgrade_v1.0.36
+-- （alpha_user_factor_* 3 表）+ upgrade_v1.0.37（dataset_key 放宽到
+-- l1_factors/rd_mined）+ upgrade_v1.0.39（factor_revision_no 列）+
+-- upgrade_v1.0.25 合并段原 v1.0.20（qm_user_report_archive）逐字下放，
+-- 合并为最终完整定义（全列 CREATE TABLE IF NOT EXISTS，不照搬 ALTER 链，
+-- 存量 ALTER 保留幂等）。
+-- 存量库靠 data/upgrade_v1.0.19.sql 拉齐（与本节同 DDL，幂等可重放）。
+-- 与企业版原文的差异：alpha_user_factor_generation_features ->
+-- rd_agent_factors(tenant_id,user_id,factor_id) 的外键省略（OSS
+-- rd_agent_factors 主键只是 factor_id，无双维唯一键可供引用，见
+-- upgrade_v1.0.16.sql 文件头同类处理）；factor_id 数据列保留。
+
+-- ---------------------------------------------------------------------------
+-- T1. 存储配额账本。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.storage_quota_state (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    ready BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.storage_quota_state (singleton, ready)
+VALUES (TRUE, FALSE)
+ON CONFLICT (singleton) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS public.storage_quota_accounts (
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    used_bytes BIGINT NOT NULL DEFAULT 0 CHECK (used_bytes >= 0),
+    reserved_bytes BIGINT NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0),
+    quota_bytes BIGINT NOT NULL CHECK (quota_bytes >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.storage_quota_reservations (
+    reservation_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    resource_key TEXT NOT NULL,
+    reserved_bytes BIGINT NOT NULL CHECK (reserved_bytes >= 0),
+    replaced_bytes BIGINT NOT NULL DEFAULT 0 CHECK (replaced_bytes >= 0),
+    actual_bytes BIGINT,
+    state VARCHAR(16) NOT NULL CHECK (state IN ('reserved', 'settled', 'released')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.storage_quota_reservations
+    ADD COLUMN IF NOT EXISTS replaced_bytes BIGINT NOT NULL DEFAULT 0
+    CHECK (replaced_bytes >= 0);
+
+CREATE INDEX IF NOT EXISTS idx_storage_quota_reservations_owner_state
+    ON public.storage_quota_reservations (tenant_id, user_id, state);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_storage_quota_active_resource
+    ON public.storage_quota_reservations (resource_key)
+    WHERE state = 'reserved';
+
+CREATE TABLE IF NOT EXISTS public.storage_quota_objects (
+    resource_key TEXT PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_storage_quota_objects_owner
+    ON public.storage_quota_objects (tenant_id, user_id);
+
+-- ---------------------------------------------------------------------------
+-- T2. 企业版用户因子代次。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alpha_user_factor_generations (
+    tenant_id TEXT NOT NULL CHECK (btrim(tenant_id) <> ''),
+    user_id TEXT NOT NULL CHECK (btrim(user_id) <> ''),
+    generation_id TEXT NOT NULL CHECK (generation_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+    dataset_key TEXT NOT NULL CHECK (dataset_key IN ('l1_factors', 'rd_mined')),
+    status TEXT NOT NULL CHECK (status IN ('building', 'published', 'failed', 'archived')),
+    job_id TEXT NOT NULL,
+    manifest_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(manifest_json) = 'object'),
+    row_count BIGINT NOT NULL DEFAULT 0 CHECK (row_count >= 0),
+    byte_count BIGINT NOT NULL DEFAULT 0 CHECK (byte_count >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_at TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, user_id, generation_id),
+    UNIQUE (tenant_id, user_id, dataset_key, generation_id),
+    FOREIGN KEY (tenant_id, user_id, job_id)
+        REFERENCES alpha_factor_jobs (tenant_id, user_id, job_id)
+);
+
+CREATE TABLE IF NOT EXISTS alpha_user_factor_generation_features (
+    tenant_id TEXT NOT NULL CHECK (btrim(tenant_id) <> ''),
+    user_id TEXT NOT NULL CHECK (btrim(user_id) <> ''),
+    generation_id TEXT NOT NULL,
+    feature_key TEXT NOT NULL CHECK (feature_key ~ '^[A-Za-z][A-Za-z0-9_]{0,127}$'),
+    factor_id TEXT NOT NULL,
+    factor_code_sha256 TEXT NOT NULL CHECK (factor_code_sha256 ~ '^[0-9a-f]{64}$'),
+    factor_revision_no BIGINT CHECK (factor_revision_no IS NULL OR factor_revision_no > 0),
+    source_task_id TEXT,
+    row_count BIGINT NOT NULL CHECK (row_count >= 0),
+    PRIMARY KEY (tenant_id, user_id, generation_id, feature_key),
+    UNIQUE (tenant_id, user_id, generation_id, factor_id),
+    FOREIGN KEY (tenant_id, user_id, generation_id)
+        REFERENCES alpha_user_factor_generations (tenant_id, user_id, generation_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, user_id, source_task_id)
+        REFERENCES alpha_mining_tasks (tenant_id, user_id, task_id)
+);
+
+ALTER TABLE alpha_user_factor_generation_features
+    ADD COLUMN IF NOT EXISTS factor_revision_no BIGINT;
+
+CREATE TABLE IF NOT EXISTS alpha_user_factor_dataset_active (
+    tenant_id TEXT NOT NULL CHECK (btrim(tenant_id) <> ''),
+    user_id TEXT NOT NULL CHECK (btrim(user_id) <> ''),
+    dataset_key TEXT NOT NULL CHECK (dataset_key IN ('l1_factors', 'rd_mined')),
+    generation_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, user_id, dataset_key),
+    FOREIGN KEY (tenant_id, user_id, dataset_key, generation_id)
+        REFERENCES alpha_user_factor_generations
+            (tenant_id, user_id, dataset_key, generation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_alpha_user_factor_generations_owner_status
+    ON alpha_user_factor_generations (tenant_id, user_id, dataset_key, status, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- T3. 报告归档（storage_quota_ledger 对账 SELECT 该表统计报告体积）。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qm_user_report_archive (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    report_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind = 'stock_deep_report'),
+    symbol TEXT NOT NULL,
+    as_of DATE,
+    generated_at TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL,
+    payload_hash TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, user_id, report_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qm_user_report_archive_owner_date
+    ON qm_user_report_archive (tenant_id, user_id, generated_at DESC);
+
+-- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
 -- 注：后续增量补丁不再进第 66 节，一律新建 data/upgrade_vX.Y.Z.sql
