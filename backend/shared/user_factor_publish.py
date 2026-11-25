@@ -33,7 +33,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,49 @@ def expression_sha256(expression: str) -> str:
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now_dt() -> datetime:
+    """DB 绑定用：必须传 aware UTC datetime 实例。
+
+    asyncpg 在参数绑定阶段就按列类型校验，`TIMESTAMPTZ` 列传 `str`
+    直接报 `DataError`，SQL 里加 `CAST(:x AS TIMESTAMPTZ)` 也救不了
+    （psycopg2 会隐式转，所以单测/sqlite 下不爆）。调用方返回给
+    JSON 的仍用 `utcnow_iso()`，写库一律用本函数。
+    """
+    return datetime.now(timezone.utc)
+
+
+def as_date(value: object) -> date | None:
+    """归一化 `DATE` 列绑定值：接受 `date/datetime/YYYY-MM-DD/YYYYMMDD`。
+
+    返回 `date` 实例或 None；空串/None → None；非法 → ValueError。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    # 兼容 ISO datetime（"2024-01-02T00:00:00+00:00" / "2024-01-02 00:00:00"）
+    if "T" in s:
+        s = s.split("T", 1)[0].strip()
+    elif " " in s and "-" in s:
+        s = s.split(" ", 1)[0].strip()
+    if len(s) == 8 and s.isdigit():
+        return date(int(s[0:4]), int(s[4:6]), int(s[6:8]))
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        for fmt in ("%Y%m%d", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except ValueError:
+                continue
+        raise ValueError(f"非法日期：{value!r}") from None
 
 
 def validate_dataset_key(value: object) -> str:
@@ -166,7 +209,7 @@ async def create_building_generation(
     generation_id = validate_generation_id(generation_id)
     dataset = validate_dataset_key(dataset_key)
     feature = validate_feature_key(feature_key)
-    now = utcnow_iso()
+    now_dt = utc_now_dt()
     await session.execute(
         text(
             """
@@ -183,7 +226,7 @@ async def create_building_generation(
             "name": str(factor_name or "")[:256],
             "sha": expression_sha256(expression),
             "by": str(created_by or "")[:128],
-            "now": now,
+            "now": now_dt,
         },
     )
     return {
@@ -191,7 +234,7 @@ async def create_building_generation(
         "dataset_key": dataset,
         "status": "building",
         "feature_key": feature,
-        "created_at": now,
+        "created_at": now_dt.isoformat(),
     }
 
 
@@ -263,7 +306,7 @@ async def publish_completed_generation(
     manifest_json = json.dumps(
         manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
-    now = utcnow_iso()
+    now_dt = utc_now_dt()
     updated = await session.execute(
         text(
             """
@@ -278,7 +321,7 @@ async def publish_completed_generation(
             "manifest": manifest_json,
             "rows": rows,
             "bytes": byte_count,
-            "now": now,
+            "now": now_dt,
             "gid": generation_id,
             "dataset": dataset,
         },
@@ -296,7 +339,7 @@ async def publish_completed_generation(
               updated_at = EXCLUDED.updated_at
             """
         ),
-        {"dataset": dataset, "gid": generation_id, "now": now},
+        {"dataset": dataset, "gid": generation_id, "now": now_dt},
     )
     await session.execute(
         text(
@@ -313,7 +356,7 @@ async def publish_completed_generation(
         "dataset_key": dataset,
         "status": "published",
         "manifest": manifest,
-        "published_at": now,
+        "published_at": now_dt.isoformat(),
     }
 
 
@@ -399,13 +442,17 @@ async def upsert_discovered_field(
     column: str,
     market: str = "CUSTOM",
     dataset_id: str = DEFAULT_DATASET_KEY,
-    min_date: str | None = None,
-    max_date: str | None = None,
+    min_date: str | date | datetime | None = None,
+    max_date: str | date | datetime | None = None,
 ) -> None:
     """发布成功后自动登记字段发现表，省掉一次手动 ``/sources/refresh``。
 
     只做单列 upsert（``is_present=TRUE``），不碰其它列；训练特征目录的
     草稿/发布仍由管理员在 ``quantdb_factor_catalog`` 侧决策。
+
+    asyncpg 按列类型绑定：``min_date/max_date`` 必须传 `date` 实例、
+    ``discovered_at`` 必须传 aware `datetime`，传 `str` 直接 DataError。
+    为兼容旧调用，本函数接受 `str` 并内部归一化。
     """
     feature = validate_feature_key(column)
     await session.execute(
@@ -426,9 +473,9 @@ async def upsert_discovered_field(
             "market": str(market or "CUSTOM").upper(),
             "dataset": str(dataset_id or DEFAULT_DATASET_KEY),
             "column": feature,
-            "min_date": min_date,
-            "max_date": max_date,
-            "now": utcnow_iso(),
+            "min_date": as_date(min_date),
+            "max_date": as_date(max_date),
+            "now": utc_now_dt(),
         },
     )
 

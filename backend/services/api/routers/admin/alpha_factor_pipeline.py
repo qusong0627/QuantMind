@@ -148,6 +148,31 @@ def _sanitize_feature_key(name: str) -> str:
 _qlib_initialized = False
 
 
+def _load_joblib_backend() -> str:
+    """Qlib 并行后端，与回测服务同口径（`QLIB_JOBLIB_BACKEND` 可覆盖）。
+
+    因子 `D.features` 是内存映射读 + 表达式计算，进程后端（loky）要把
+    任务 pickle 到子进程并在子进程重建缓存，csi300 全历史会卡死；
+    threading 共享内存，实测 710k 行 1.7 秒，故缺省 threading。
+    """
+    backend = os.getenv("QLIB_JOBLIB_BACKEND")
+    if backend and backend.strip():
+        return backend.strip()
+    return "threading"
+
+
+def _load_kernels() -> int:
+    raw = os.getenv("QLIB_BACKTEST_KERNELS") or os.getenv("QLIB_KERNELS")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            logger.warning("Invalid QLIB_BACKTEST_KERNELS value: %r", raw)
+    return max(1, min((os.cpu_count() or 1), 8))
+
+
 def _ensure_qlib_init():
     """确保 Qlib 已初始化（惰性初始化，只执行一次）。"""
     global _qlib_initialized
@@ -156,9 +181,20 @@ def _ensure_qlib_init():
     try:
         import qlib
         from qlib.config import C
-        qlib.init(provider_uri=QLIB_PROVIDER_URI, region="cn")
+        joblib_backend = _load_joblib_backend()
+        kernels = _load_kernels()
+        qlib.init(
+            provider_uri=QLIB_PROVIDER_URI,
+            region="cn",
+            joblib_backend=joblib_backend,
+        )
+        C["joblib_backend"] = joblib_backend
+        C["kernels"] = kernels
         _qlib_initialized = True
-        logger.info("Qlib initialized with provider_uri=%s", QLIB_PROVIDER_URI)
+        logger.info(
+            "Qlib initialized with provider_uri=%s joblib_backend=%s kernels=%s",
+            QLIB_PROVIDER_URI, joblib_backend, kernels,
+        )
     except Exception as e:
         logger.error("Failed to init Qlib: %s", e)
         raise RuntimeError(f"Qlib 初始化失败: {e}") from e
