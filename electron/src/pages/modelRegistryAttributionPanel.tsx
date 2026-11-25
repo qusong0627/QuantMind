@@ -666,7 +666,7 @@ export const AttributionAnalysisPanel: React.FC<{
                 />
                 <div className="mt-2 flex items-center justify-between">
                   <span className="flex items-center gap-1 text-[10px] text-slate-400">
-                    <Info size={11} /> 正向=因子越大模型越看好；正向比=跨样本方向一致性
+                    <Info size={11} /> 正向=因子值与模型输出正相关；正向比=跨样本方向一致性
                   </span>
                   <Pagination
                     size="small"

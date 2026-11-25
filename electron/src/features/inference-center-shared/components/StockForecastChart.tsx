@@ -341,7 +341,7 @@ export const StockForecastChart: React.FC<StockForecastChartProps> = ({
                         lineStyle: { color: '#f59e0b', type: 'dashed', width: 1.2 },
                         label: {
                           show: true,
-                          formatter: `分数隐含目标价 ${currencySymbol}${targetPrice.toFixed(2)}`,
+                          formatter: `分数换算参考值 ${currencySymbol}${targetPrice.toFixed(2)}`,
                           position: 'insideEndTop',
                           color: '#b45309',
                           fontSize: 9,

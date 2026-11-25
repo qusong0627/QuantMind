@@ -12,9 +12,21 @@
 查询结果缓存 Redis 60s, 避免每 3s 循环打库; 查询异常按非会员处理(收费功能 fail-closed)。
 """
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
+
+# 合规开关：开源版默认**不设付费墙**（软件免费、功能完整）。
+# 若要重新启用付费门控，必须同时确认你的行情数据来源已获得相应授权——
+# 付费向用户分发交易所实时行情需要行情分发许可，默认关闭是为了避免
+# 「开源免费」与「付费行情」自相矛盾。
+_MEMBER_GATE_ENABLED = os.getenv("QM_MEMBER_GATE_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 MEMBER_CACHE_KEY = "trade:member_gate:{tenant_id}:{user_id}"
 MEMBER_CACHE_TTL = 60  # 秒
@@ -23,7 +35,13 @@ MEMBER_RETRY_SECONDS = 60  # 非会员时的重试间隔
 
 
 async def is_paid_member(tenant_id: str, user_id: str) -> bool:
-    """账户是否为 QuantDB 付费会员在期（Redis 缓存 60s，失败按非会员处理）。"""
+    """账户是否放行实时行情（Redis 缓存 60s，失败按非会员处理）。
+
+    默认 `QM_MEMBER_GATE_ENABLED=false` → **所有人放行**（开源版无付费墙）。
+    显式开启时才回落到「在期付费订阅」判定。
+    """
+    if not _MEMBER_GATE_ENABLED:
+        return True
     try:
         from backend.services.trade_shared.redis_client import get_redis
 
@@ -70,7 +88,7 @@ async def _query_paid_member(tenant_id: str, user_id: str) -> bool:
 async def member_gate_status(tenant_id: str, user_id: str) -> dict:
     """会员门控状态（status 端点展示用）。"""
     return {
-        "enabled": True,
+        "enabled": _MEMBER_GATE_ENABLED,
         "allowed": await is_paid_member(tenant_id, user_id),
         "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }

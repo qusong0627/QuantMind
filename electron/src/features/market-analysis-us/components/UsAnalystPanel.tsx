@@ -301,8 +301,8 @@ export const UsAnalystPanel: React.FC = () => {
           className="!p-2.5 gap-1.5 h-full min-h-0"
           title={
             <span className="flex items-center gap-1.5">
-              <Target className="w-3.5 h-3.5 text-blue-600" />目标价隐含空间
-              <span className="text-[9px] font-normal text-slate-400">现价 vs 目标均价</span>
+              <Target className="w-3.5 h-3.5 text-blue-600" />第三方目标均价
+              <span className="text-[9px] font-normal text-slate-400">现价 vs 第三方目标均价（数据展示）</span>
             </span>
           }
           extra={<DateBadge label="收盘" date={targets?.close_date} />}
@@ -312,7 +312,8 @@ export const UsAnalystPanel: React.FC = () => {
           ) : (
             <div className={`flex flex-col flex-1 min-h-0 ${SCROLL}`}>
               <p className="text-[9px] text-slate-400 pb-1">
-                按隐含空间降序；后端已剔除 |空间| &gt; 200% 的离群值（退市/并购残留标的）；目标价快照无日期字段，以收盘价日期为准。
+                以下为第三方机构研报数据的中性展示，<b>非本软件的判断或结论</b>；排序仅按第三方目标均价距离，不代表任何优先级。
+                后端已剔除 |空间| &gt; 200% 的离群值（退市/并购残留标的）；目标价快照无日期字段，以收盘价日期为准。
               </p>
               <div className={`${HEAD} ${TARGET_GRID} sticky top-0 z-10 bg-white/95 backdrop-blur`}>
                 <span>#</span>

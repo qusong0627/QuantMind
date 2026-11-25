@@ -2638,7 +2638,7 @@ const AIIDEPage: React.FC<AIIDEPageProps> = ({ strategyEditorMode = false }) => 
                                         ? "bg-blue-50 text-blue-700 border-blue-200 font-bold"
                                         : "bg-gray-50 text-gray-400 border-gray-100 hover:text-gray-600"
                                 )}
-                                title="量化策略设计、因子推荐、回测分析"
+                                title="量化策略设计、因子筛选、回测分析"
                             >
                                 <Sparkles size={10} />量化分析师
                             </button>

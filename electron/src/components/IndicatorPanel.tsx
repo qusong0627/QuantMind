@@ -468,7 +468,7 @@ export const IndicatorPanel: React.FC<IndicatorPanelProps> = ({
       case 'RSI':
         return 'RSI相对强弱指标：衡量价格变动的速度和幅度。RSI>70为超买，RSI<30为超卖。';
       case 'MACD':
-        return 'MACD指数平滑异同移动平均线：由DIF、DEA和MACD柱组成。DIF上穿DEA为金叉（买入），下穿为死叉（卖出）。';
+        return 'MACD指数平滑异同移动平均线：由DIF、DEA和MACD柱组成。DIF上穿DEA称金叉，下穿称死叉（仅为形态描述，不构成操作建议）。';
       case 'KDJ':
         return 'KDJ随机指标：由K、D、J三条线组成。K>D为强势，J>80超买，J<20超卖。';
       default:

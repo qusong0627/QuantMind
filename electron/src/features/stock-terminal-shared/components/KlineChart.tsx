@@ -345,13 +345,14 @@ export function KlineChart({
         : undefined,
     });
 
-    // 分数隐含目标价（仅 return 口径）：窗口内画一条虚线，目标日打点。
-    // 这不是分位预测，只是把「最新分数 × 最新收盘」画出来；rank 口径不画。
+    // 分数换算参考线（仅 return 口径）：窗口内画一条虚线，目标日打点。
+    // 这不是价格预测、不是目标价，只是把「最新分数 × 最新收盘」按同一比例画成参考刻度；
+    // rank 口径不画。文案禁止出现「目标价」等判断性措辞。
     if (targetPrice != null && hasWindow) {
       const winStart = Number(entryIdx);
       const winEnd = Number(targetIdx);
       series.push({
-        name: '分数隐含目标价',
+        name: '模型分数换算参考线',
         type: 'line',
         xAxisIndex: 0,
         yAxisIndex: 0,
@@ -368,7 +369,7 @@ export function KlineChart({
           label: {
             show: true,
             position: 'top',
-            formatter: `目标价 ${targetPrice.toFixed(2)}`,
+            formatter: `参考值 ${targetPrice.toFixed(2)}`,
             color: '#b45309',
             fontSize: 9,
             fontWeight: 700,

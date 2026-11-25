@@ -29,8 +29,9 @@ const WINDOW_LABEL: Record<string, string> = {
 };
 
 const VERDICT_META: Record<string, { label: string; color: string }> = {
-  not_recommended: { label: '未达推荐', color: 'default' },
-  recommended: { label: '推荐', color: 'blue' },
+  // 合规：结论标签只说「是否达到预设的证据标准」，不出现「推荐」等投资判断措辞
+  not_recommended: { label: '未达证据标准', color: 'default' },
+  recommended: { label: '达到证据标准', color: 'blue' },
   watch: { label: '观察', color: 'gold' },
 };
 
@@ -247,12 +248,12 @@ export const ComboEvidencePanel: React.FC<ComboEvidencePanelProps> = ({
           showIcon
           message={
             hasRecommendation
-              ? `研究推荐：${recommendation!.ids.join('、')}`
-              : '研究结论：暂无推荐组合'
+              ? `达到证据标准：${recommendation!.ids.join('、')}`
+              : '研究结论：暂无达到证据标准的组合'
           }
           description={
             recommendation?.reason ||
-            '证据包未给出推荐理由；在推荐出来之前，页面不声称任何组合「命中率最高」。'
+            '证据包未给出判定理由；在判定出来之前，页面不声称任何组合「命中率最高」。'
           }
         />
         <div className="flex flex-wrap items-center gap-1.5">

@@ -78,14 +78,14 @@ describe('ComboEvidencePanel', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
-  it('无推荐时如实展示「暂无推荐组合」与判据理由', () => {
+  it('无判定时如实展示「暂无达到证据标准的组合」与判据理由', () => {
     render(<ComboEvidencePanel {...baseProps} evidence={evidence()} />);
-    expect(screen.getByText('研究结论：暂无推荐组合')).toBeInTheDocument();
+    expect(screen.getByText('研究结论：暂无达到证据标准的组合')).toBeInTheDocument();
     expect(screen.getAllByText(/K-R4/).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/研究推荐：/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/达到证据标准：/)).not.toBeInTheDocument();
   });
 
-  it('有推荐时抬出组合 id，不隐藏来源', () => {
+  it('有判定时抬出组合 id，不隐藏来源', () => {
     render(
       <ComboEvidencePanel
         {...baseProps}
@@ -94,7 +94,7 @@ describe('ComboEvidencePanel', () => {
         })}
       />,
     );
-    expect(screen.getByText('研究推荐：C3_tree_t10')).toBeInTheDocument();
+    expect(screen.getByText('达到证据标准：C3_tree_t10')).toBeInTheDocument();
   });
 
   it('判据标签区分 通过 / 未过 / 已执行', () => {
@@ -107,7 +107,7 @@ describe('ComboEvidencePanel', () => {
   it('候选行按百分比/差值格式显示指标，缺失为 —', () => {
     render(<ComboEvidencePanel {...baseProps} evidence={evidence()} />);
     expect(screen.getByText('全13·T+10 等权')).toBeInTheDocument();
-    expect(screen.getByText('未达推荐')).toBeInTheDocument();
+    expect(screen.getByText('未达证据标准')).toBeInTheDocument();
     expect(screen.getByText('52.3%')).toBeInTheDocument();
     expect(screen.getByText('[-1.20 pp, +0.40 pp]')).toBeInTheDocument();
     expect(screen.getByText('13.7% / -15.4%')).toBeInTheDocument();

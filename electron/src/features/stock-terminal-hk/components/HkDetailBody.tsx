@@ -203,15 +203,16 @@ function AnalystBlock({ d, close }: { d: HkStockDetail['analyst']; close?: numbe
     <div>
       <div className="flex items-center gap-1.5 mb-1">
         <Target className="w-3.5 h-3.5 text-rose-500" />
-        <span className="text-[11px] font-black text-slate-700">分析师共识</span>
+        <span className="text-[11px] font-black text-slate-700">第三方分析师共识</span>
+        <span className="text-[9px] text-slate-400 font-normal">数据展示 · 非本软件结论</span>
       </div>
       {pt ? (
         <>
-          <Row label="目标价均值" value={fmtYi(pt.mean as number)} unit="港元" strong />
-          <Row label="目标价区间" value={`${fmtYi(pt.low as number)} ~ ${fmtYi(pt.high as number)}`} unit="港元" />
+          <Row label="第三方目标均价" value={fmtYi(pt.mean as number)} unit="港元" strong />
+          <Row label="第三方目标区间" value={`${fmtYi(pt.low as number)} ~ ${fmtYi(pt.high as number)}`} unit="港元" />
           {close ? <Row label="较现价空间" value={(pt.mean != null ? ((pt.mean - close) / close) * 100 : 0).toFixed(1)} unit="%" /> : null}
         </>
-      ) : <div className="text-[11px] text-slate-400 py-1">暂无目标价</div>}
+      ) : <div className="text-[11px] text-slate-400 py-1">暂无第三方目标价</div>}
       {rec && (
         <div className="mt-2">
           <div className="flex items-center gap-1.5 mb-1.5">

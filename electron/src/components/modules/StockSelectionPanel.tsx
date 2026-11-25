@@ -145,7 +145,7 @@ const STOCK_POOL_TEMPLATES: StockPoolTemplate[] = [
 
     // ===== 价值/成长 =====
     {
-        id: 'value', name: '低估值', description: '市盈率<15、市净率<1.5的价值股',
+        id: 'value', name: '低市盈率·低市净率', description: '市盈率<15、市净率<1.5',
         query: '市盈率大于0且小于15，市净率小于1.5，ROE大于8%的非ST股票',
         icon: <DollarSign size={16} />, color: 'from-emerald-600 to-green-700', category: '价值成长',
     },

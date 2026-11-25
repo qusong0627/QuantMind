@@ -203,7 +203,7 @@ function AnalystsPanel({ d }: { d: UsStockDetail }) {
   return (
     <>
       {t && (t.mean != null || t.high != null) ? (
-        <Section title="目标价" hint={upside != null ? `隐含空间 ${fmtPct(upside)}` : ''}>
+        <Section title="第三方目标价" hint={upside != null ? `隐含空间 ${fmtPct(upside)}` : ''}>
           <Row label="现价" value={fmtNum(t.current)} />
           <Row label="均值目标" value={fmtNum(t.mean)} tone={toneOf(upside)} />
           <Row label="中位数" value={fmtNum(t.median)} />

@@ -91,7 +91,7 @@ export const FactorPortfolioModal: React.FC<Props> = ({ open, dataset, datasetLa
       }
     >
       {!data?.available ? (
-        <div className="py-10 text-center text-xs text-slate-500">{loading ? '计算中…' : data?.reason || '暂无推荐组合'}</div>
+        <div className="py-10 text-center text-xs text-slate-500">{loading ? '计算中…' : data?.reason || '暂无达到证据标准的组合'}</div>
       ) : (
         <div className="flex flex-col gap-3 max-h-[74vh] overflow-y-auto custom-scrollbar pr-1">
           {summary && (

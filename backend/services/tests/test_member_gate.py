@@ -1,12 +1,23 @@
-"""会员门控单元测试：QuantDB 付费会员在期判定。"""
+"""会员门控单元测试：QuantDB 付费会员在期判定。
+
+开源版默认 **不设付费墙**（`QM_MEMBER_GATE_ENABLED=false` → 所有人放行）。
+下面 TestIsPaidMember 测的是「门控开启时」的判定机制，故 autouse 显式打开；
+门控默认关闭的行为由 TestGateDisabledByDefault 单独钉住。
+"""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import backend.services.trade.services.member_gate as mg
 from backend.services.trade.services.member_gate import (
     MEMBER_CACHE_KEY,
     is_paid_member,
 )
+
+
+@pytest.fixture(autouse=True)
+def _gate_enabled(monkeypatch):
+    monkeypatch.setattr(mg, "_MEMBER_GATE_ENABLED", True)
 
 
 class _FakeResult:
@@ -105,3 +116,16 @@ class TestIsPaidMember:
         ):
             # 缓存写失败仍按查库结果放行
             assert await is_paid_member("default", "00000001") is True
+
+
+class TestGateDisabledByDefault:
+    """开源版默认无付费墙：合规要求「软件免费、功能完整」。"""
+
+    @pytest.mark.asyncio
+    async def test_gate_off_allows_everyone_without_touching_storage(self, monkeypatch):
+        monkeypatch.setattr(mg, "_MEMBER_GATE_ENABLED", False)
+        with patch(GET_REDIS_PATH) as redis_factory, patch(GET_SESSION_PATH) as session_factory:
+            assert await mg.is_paid_member("default", "00000001") is True
+        redis_factory.assert_not_called()
+        session_factory.assert_not_called()
+
