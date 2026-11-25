@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,15 @@ _MARKET_DATA_MOUNT_DIRS = {
     "FUTURES": "/tmp/quantfutures_data",
     "CUSTOM": "/data/quantcustom",
 }
+# 跨根软链的平行挂载点。
+# CN/HK/… 数据根下可能挂着指向 CUSTOM 根的子库（如
+# ``6_ml_datasets/fused189 -> ../../quantcustom/6_ml_datasets/fused189``）。
+# 这类软链是**相对路径**：API 容器里解析到 /data/quantcustom（已由 ./data:/data 覆盖），
+# 训练容器只挂了单一市场数据根（CN 为 /tmp/quantdb_data），相对路径会落到
+# /tmp/quantcustom ——不把 CUSTOM 根挂到这里，软链就是悬空的，读取端直接报
+# "Unsupported factor source"（2026-11-25 实测）。
+# 挂载点取 ``<市场挂载目录的父目录>/quantcustom``，与相对软链的 ../../ 段数对齐。
+_CUSTOM_PARALLEL_MOUNT_NAME = "quantcustom"
 # 训练容器内环境变量名（train.py 按市场选择数据根目录）
 _MARKET_MOUNT_ENV_VARS = {
     "CN": "QUANTDB_DATA_DIR",
@@ -626,6 +636,13 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             next_progress = max(next_progress, 42)
         if "split mode:" in text or "val_ratio mode:" in text:
             next_progress = max(next_progress, 50)
+        # Deep-learning（NativeTFT/GRU/LSTM…）按 epoch 推进：50 → 78，
+        # 之后由 "training finished"/"model saved" 接管。没有这条时 TFT 整段
+        # 训练都停在 50%（下面这些标记只覆盖 GBDT 的 early stopping）。
+        epoch = re.search(r"epoch\s+(\d+)\s*/\s*(\d+)", text)
+        if epoch:
+            done, total = int(epoch.group(1)), max(1, int(epoch.group(2)))
+            next_progress = max(next_progress, 50 + int(28 * done / total))
         # LightGBM / XGBoost / CatBoost early stopping patterns
         if "did not meet early stopping" in text or "early stopping, best iteration" in text:
             next_progress = max(next_progress, 70)
@@ -1070,6 +1087,28 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 logger.warning(
                     "[%s] %s data dir not visible at %s; factor source will be unavailable",
                     run_id, _train_market, market_data_dir(_train_market),
+                )
+        # 跨根软链：把 CUSTOM 根挂到与市场挂载目录平行的位置（CN: /tmp/quantcustom），
+        # 使 ``6_ml_datasets/<lib> -> ../../quantcustom/6_ml_datasets/<lib>`` 这类
+        # 相对软链在训练容器内能解析到真实目录。软链由数据侧维护（不再拷贝/硬链），
+        # custom 根新增分区自动可见。
+        if _train_market != "CUSTOM":
+            _custom_host, _ = _market_data_mount("CUSTOM")
+            _custom_container_dir = market_data_dir("CUSTOM")
+            if Path(_custom_container_dir).exists():
+                _parallel_mount = str(
+                    Path(_MARKET_DATA_MOUNT_DIRS[_train_market]).parent
+                    / _CUSTOM_PARALLEL_MOUNT_NAME
+                )
+                volumes[_custom_host] = {"bind": _parallel_mount, "mode": "ro"}
+                logger.info(
+                    "[%s] CUSTOM data mounted for cross-root links: %s (host) -> %s",
+                    run_id, _custom_host, _parallel_mount,
+                )
+            else:
+                logger.warning(
+                    "[%s] CUSTOM data dir not visible at %s; cross-root factor libs will be unavailable",
+                    run_id, _custom_container_dir,
                 )
         logger.info(
             "[%s] Training workspace mounted: %s (host) -> /workspace (container writes to %s)",
