@@ -3,7 +3,14 @@
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 
 GRID_SEARCH_MAX_COMBINATIONS = 100
@@ -138,6 +145,23 @@ class QlibBacktestRequest(BaseModel):
 
     user_id: str = Field("default", description="用户ID")
     tenant_id: str = Field("default", description="租户ID")
+
+    @field_validator("user_id")
+    @classmethod
+    def _require_real_user(cls, value: Any) -> str:
+        """拒绝占位 user_id，避免回测落盘到 default/default 孤儿目录。
+
+        fail-closed：None/空/"default"/全零（normalize_user_id(None) 的
+        产出）一律 422，调用方必须传入真实认证身份。对账端
+        （reconcile_local_storage）拒绝猜测归属，孤儿目录会直接让
+        storage_quota_state.ready 打回 FALSE。
+        """
+        from backend.shared.utils import normalize_user_id
+
+        normalized = normalize_user_id(value)
+        if not normalized or normalized in {"default", "00000000"}:
+            raise ValueError("user_id is required (refusing placeholder 'default')")
+        return normalized
 
     # 动态仓位
     dynamic_position: bool = Field(False, description="是否启用动态仓位")

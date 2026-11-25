@@ -156,6 +156,25 @@ class PipelineService:
         self._tables_ready = True
 
     @staticmethod
+    def _require_real_owner(request: PipelineRunRequest) -> tuple[str, str]:
+        """拒绝占位身份，避免产物落盘到 default/default 孤儿目录。
+
+        fail-closed：user_id 为 None/空/"default"/全零时直接抛错，
+        不再透传给 QlibBacktestRequest。对账端拒绝猜测归属，
+        孤儿目录会把 storage_quota_state.ready 打回 FALSE。
+        """
+        from backend.shared.utils import normalize_user_id
+
+        tenant = str(request.tenant_id or "default").strip() or "default"
+        raw_user = str(request.user_id or "").strip()
+        normalized_user = normalize_user_id(raw_user) if raw_user else ""
+        if not normalized_user or normalized_user in {"default", "00000000"}:
+            raise ValueError("user_id is required (refusing placeholder 'default')")
+        request.user_id = normalized_user
+        request.tenant_id = tenant
+        return tenant, normalized_user
+
+    @staticmethod
     def _extract_inference_meta(inference_result: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(inference_result, dict):
             return {
@@ -186,6 +205,7 @@ class PipelineService:
         return await self.persistence.cleanup_old_runs(user_id=user_id, tenant_id=tenant_id, keep_days=keep_days)
 
     async def create_run(self, request: PipelineRunRequest) -> str:
+        self._require_real_owner(request)
         await self._ensure_tables()
         run_id = uuid.uuid4().hex
         rec = _RunRecord(request=request)
@@ -518,8 +538,7 @@ class PipelineService:
     async def _run_inference(self, request: PipelineRunRequest, *, run_id: str) -> dict[str, Any]:
         if request.inference_data is None:
             raise ValueError("inference_data is required when inference_enabled=true")
-        if not request.user_id or not request.tenant_id:
-            raise ValueError("user_id and tenant_id are required when inference_enabled=true")
+        self._require_real_owner(request)
 
         result = await self.inference_router_service.predict_with_fallback_async(
             request.model_id or "",
@@ -645,6 +664,7 @@ class PipelineService:
         strategy_code: str,
         pred_path: Path | None,
     ) -> dict[str, Any]:
+        self._require_real_owner(request)
         end = request.end_date or datetime.now().strftime("%Y-%m-%d")
         start = request.start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 

@@ -661,6 +661,35 @@ def _ensure_stock_pool() -> None:
         logger.warning("全局股票池初始化失败（不影响启动）: %s", e)
 
 
+def _ensure_storage_quota_reconcile() -> None:
+    """启动期重建存储配额台账（幂等，失败仅告警，准入保持关闭）。
+
+    ``reconcile_local_storage`` 全仓库此前无调用点，
+    ``storage_quota_state.ready`` 会永远停在种子值 FALSE，
+    所有走 ``write_quota_managed_local_file`` 的写盘（因子物化/
+    导出、面板、pipeline 产物等）都会被 fail-closed 拒绝。
+
+    开关 ``QM_STORAGE_RECONCILE_ON_STARTUP``：默认开启（缺省/非显式
+    关闭值即跑）；显式设为 0/false/no/off 可跳过（例如由外部
+    Job/Operator 负责对账的多副本部署）。
+    对账失败不抛错：ready 保持 FALSE，写盘继续被拒，靠告警发现，
+    绝不静默放行。
+    """
+    raw = os.getenv("QM_STORAGE_RECONCILE_ON_STARTUP", "true").strip().lower()
+    if raw in {"0", "false", "no", "off", "disabled"}:
+        logger.info("存储配额启动对账已跳过（QM_STORAGE_RECONCILE_ON_STARTUP=%s）", raw)
+        return
+    try:
+        import asyncio
+
+        from backend.shared.storage_quota_ledger import reconcile_local_storage
+
+        asyncio.run(reconcile_local_storage())
+        logger.info("存储配额启动对账完成（ready=TRUE）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("存储配额启动对账失败（准入保持关闭，不影响启动）: %s", e)
+
+
 def main():
     """主入口"""
     # 启动前确保数据库表结构完整
@@ -669,6 +698,8 @@ def main():
     _ensure_seed_admin()
     # 启动期确保全局股票池表结构与内置池 seed（幂等，失败不影响启动）
     _ensure_stock_pool()
+    # 启动期重建存储配额台账（幂等；失败时准入保持关闭）
+    _ensure_storage_quota_reconcile()
 
     service_mode = os.getenv("SERVICE_MODE", "all").lower().strip()
     ports = get_service_ports()

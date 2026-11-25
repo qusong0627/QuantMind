@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class FactorMaterializationCancelled(RuntimeError):

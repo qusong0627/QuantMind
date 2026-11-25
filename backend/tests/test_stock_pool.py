@@ -699,7 +699,7 @@ class TestP3BacktestBridge:
             QlibBacktestRequest,
         )
 
-        req = QlibBacktestRequest(pool_id="pool:csi300")
+        req = QlibBacktestRequest(pool_id="pool:csi300", user_id="10000001")
         assert req.pool_id == "pool:csi300"
         assert req.universe == "all"  # 默认不动，由运行时覆盖
 

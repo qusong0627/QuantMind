@@ -686,6 +686,27 @@ def _init_qlib():
     return True
 
 
+def _require_ai_ide_user_id() -> str:
+    """AI-IDE 本地回测必须携带真实用户身份，拒绝占位值。
+
+    fail-closed：USER_ID 缺失/空/"default"/全零时直接抛错，
+    禁止回测落盘到 data/backtest_results/default/default 孤儿目录
+    （对账端拒绝猜测归属，会把 storage_quota_state.ready 打回 FALSE，
+    全站配额写盘被拒）。
+    """
+    from backend.shared.utils import normalize_user_id
+
+    raw = (os.getenv("USER_ID") or "").strip()
+    normalized = normalize_user_id(raw) if raw else ""
+    if not normalized or normalized in {"default", "00000000"}:
+        raise RuntimeError(
+            "AI_IDE backtest requires a real USER_ID "
+            "(refusing placeholder 'default'); "
+            "set USER_ID to the authenticated user before running"
+        )
+    return normalized
+
+
 def _run_module_backtest(module):
     """执行模块型策略（回测中心兼容模式）"""
     import json
@@ -774,8 +795,8 @@ def _run_module_backtest(module):
             transfer_fee=transfer_fee,
             min_transfer_fee=min_transfer_fee,
             impact_cost_coefficient=impact_cost_coefficient,
-            user_id=os.getenv("USER_ID", "default"),
-            tenant_id=os.getenv("TENANT_ID", "default"),
+            user_id=_require_ai_ide_user_id(),
+            tenant_id=(os.getenv("TENANT_ID", "default").strip() or "default"),
             strategy_id=strategy_id,
             signal_lag_days=signal_lag_days,
             deal_price=deal_price,

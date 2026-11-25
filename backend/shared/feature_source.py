@@ -83,6 +83,49 @@ def user_dataset_dir(dataset: str = _DEFAULT_SOURCE) -> Path:
     return factor_source_dir(dataset, market="CUSTOM")
 
 
+def quantcustom_root() -> Path:
+    """用户自定义数据根目录（与配额对账共用同一口径）。
+
+    容器内 ``/data/quantcustom``，可用 ``QM_QUANTCUSTOM_DATA_DIR`` 覆盖。
+    因子物化/导出/清理等写盘链路的用户目录均挂在此根下
+    （``<root>/users/{tenant}/{user}/...``），与
+    ``storage_quota_ledger.reconcile_local_storage`` 的
+    ``QM_QUANTCUSTOM_DATA_DIR/users`` 盘点口径一致。
+    """
+    env = os.getenv("QM_QUANTCUSTOM_DATA_DIR", "").strip()
+    if env:
+        return Path(env)
+    return Path("/data/quantcustom")
+
+
+def user_factor_dataset_dir(
+    tenant_id: str,
+    user_id: str,
+    dataset: str = "rd_mined",
+    *,
+    generation_id: str,
+) -> Path:
+    """某次因子物化 generation 的用户数据集目录。
+
+    布局 ``<quantcustom>/users/{tenant}/{user}/factor_generations/{generation}/
+    6_ml_datasets/<dataset>``，与 ``factor_job_executor`` 写盘端
+    （``relative_prefix = factor_generations/{gen}/6_ml_datasets/rd_mined``）
+    和 ``owner_purge`` 清理端一致。
+    """
+    from backend.shared.owner_path import owner_segment, user_scoped_dir
+
+    if not str(generation_id or "").strip():
+        raise ValueError("generation_id is required")
+    base = user_scoped_dir(quantcustom_root() / "users", tenant_id, user_id)
+    return (
+        base
+        / "factor_generations"
+        / owner_segment(generation_id)
+        / "6_ml_datasets"
+        / owner_segment(dataset)
+    )
+
+
 def list_factor_partitions(
     source: str = _DEFAULT_SOURCE, market: str = "CN"
 ) -> list[Path]:
