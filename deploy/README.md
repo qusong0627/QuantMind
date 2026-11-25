@@ -12,7 +12,7 @@
 
 ## 完整部署
 
-完整部署包 CDN 目录默认是 `https://cdn.quantmind.cloud/quantmind-offline`，应包含：
+完整部署包 CDN 目录默认是 `https://www.quantmindai.cn/downloads`，应包含：
 
 ```text
 SHA256SUMS

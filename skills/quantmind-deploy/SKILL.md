@@ -168,7 +168,7 @@ sudo QUANTMIND_OFFLINE_BASE_URL='https://cdn.example.com/quantmind-offline' \
 
 1. 安装系统依赖与 Docker / Compose，配置镜像加速；
 2. 从 CDN 下载离线包并 SHA-256 全量校验（支持断点续传 / 复用）；
-3. 导入 Docker 镜像（9 个；`rsshub` 部署时在线拉取）；
+3. 导入 Docker 镜像（7 个：业务 2 + 第三方 5；`rsshub` 部署时在线拉取，`ib-gateway` 随 IB 通道下线不再打包）；
 4. 拉取代码（支持 Compose/Dockerfile 受控覆盖层）；
 5. 恢复业务数据、模型与 Qlib 数据；
 6. 恢复 PostgreSQL 业务数据（已有数据默认保留）；

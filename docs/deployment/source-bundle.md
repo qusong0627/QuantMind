@@ -10,7 +10,7 @@
 curl -fsSL https://gitee.com/qusong0627/QuantMind/raw/master/deploy/full-deploy.sh | sudo bash
 ```
 
-默认 CDN 地址为 `https://cdn.quantmind.cloud/quantmind-offline`。详情见 [deploy/README.md](deploy/README.md)。
+默认 CDN 地址为 `https://www.quantmindai.cn/downloads`。详情见 [deploy/README.md](deploy/README.md)。
 
 ## 源码手动部署
 
