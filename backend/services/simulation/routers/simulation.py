@@ -367,10 +367,6 @@ async def reset_simulation_account(
             detail=f"初始金额必须为{int(SIM_AMOUNT_STEP / 10000)}万元的整数倍",
         )
 
-    # 当显式传入 initial_cash 时，同步更新 settings，保证后续 initial_equity 口径一致。
-    if request.initial_cash is not None:
-        await manager.set_initial_cash(uid, initial_cash, tenant_id=auth.tenant_id)
-
     market = str(request.market or "CN").upper()
     # 清空数据库中的历史交易/订单/快照，避免重置后前端仍拉到旧数据。
     # user_id 有 int 与原始 sub 两种口径（历史 varchar 兼容），一并清理。
@@ -390,12 +386,14 @@ async def reset_simulation_account(
         from backend.shared.database_manager_v2 import get_session as _get_session
         uid_str_variants = {str(uid), str(auth.user_id)}
         async with _get_session() as _session:
+            await SimulationFundSnapshotService.clear_user_daily(
+                _session, auth.tenant_id, uid_str_variants
+            )
             await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             for uv in uid_str_variants:
                 await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
                 await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": uv})
-                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": uv})
                 for _table in _NEW_LEDGER_TABLES:
                     try:
                         # SAVEPOINT 隔离：表不存在（如旧库）只回滚本条，不影响已删数据
@@ -409,6 +407,11 @@ async def reset_simulation_account(
             await _session.commit()
     except Exception as _e:
         logger.warning(f"Reset DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")
+        raise HTTPException(503, "清理模拟盘历史失败，请重试") from _e
+
+    # 当显式传入 initial_cash 时，同步更新 settings，保证后续 initial_equity 口径一致。
+    if request.initial_cash is not None:
+        await manager.set_initial_cash(uid, initial_cash, tenant_id=auth.tenant_id)
 
     # 清空 Redis 缓存（交易列表/统计），避免重置后仍命中旧缓存秒级延迟
     # 运行态身份必须与 live_trading 完全同口径：数字补零8位、非数字保持原样。
@@ -746,6 +749,25 @@ async def confirm_holding_sync(
     manager = SimulationAccountManager(redis)
     uid = _require_user_id(auth.user_id, auth.tenant_id)
 
+    # 确认持仓价格可用后，再清理原有账户数据。
+    sync_positions = []
+    total_market_value = 0.0
+    for item in request.holdings:
+        # 与预览一致：优先使用前端回传的 OCR 识别价，仅在缺失时兜底。
+        try:
+            price = float(item.current_price or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            price = await _get_latest_close_from_quantdb(item.symbol)
+        if price <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"无法获取股票 {item.symbol} 的实时价格或历史收盘价，同步中止。请检查代码是否正确。",
+            )
+        total_market_value += price * item.quantity
+        sync_positions.append({"symbol": item.symbol, "quantity": item.quantity, "price": price})
+
     # OCR 同步即“重新对齐起点”：先清旧成交/快照/新台账，避免旧基线导致
     # today_pnl 脉冲、历史曲线串基线（与 reset 同口径）。
     try:
@@ -753,12 +775,14 @@ async def confirm_holding_sync(
         from backend.shared.database_manager_v2 import get_session as _get_session
         _uid_variants = {str(uid), str(auth.user_id)}
         async with _get_session() as _session:
+            await SimulationFundSnapshotService.clear_user_daily(
+                _session, auth.tenant_id, _uid_variants
+            )
             await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND user_id=:uid"), {"tid": auth.tenant_id, "uid": uid})
             for _uv in _uid_variants:
                 await _session.execute(_text("DELETE FROM sim_trades WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
                 await _session.execute(_text("DELETE FROM sim_orders WHERE tenant_id=:tid AND cast(user_id as varchar)=:uid_str"), {"tid": auth.tenant_id, "uid_str": _uv})
-                await _session.execute(_text("DELETE FROM simulation_fund_snapshots WHERE tenant_id=:tid AND user_id=:uid2"), {"tid": auth.tenant_id, "uid2": _uv})
                 for _table in (
                     "simulation_accounts",
                     "simulation_position_lots",
@@ -779,32 +803,7 @@ async def confirm_holding_sync(
             await _session.commit()
     except Exception as _e:
         logger.warning(f"OCR sync DB cleanup failed for {auth.tenant_id}:{uid}: {_e}")
-
-    # 1. 预先获取所有股票的最新价格并计算总市值
-    sync_positions = []
-    total_market_value = 0.0
-
-    for item in request.holdings:
-        # 与预览一致：优先使用前端回传的 OCR 识别价，仅在缺失时兜底
-        try:
-            price = float(item.current_price or 0)
-        except (TypeError, ValueError):
-            price = 0.0
-        if price <= 0:
-            price = await _get_latest_close_from_quantdb(item.symbol)
-
-        if price <= 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"无法获取股票 {item.symbol} 的实时价格或历史收盘价，同步中止。请检查代码是否正确。"
-            )
-
-        total_market_value += price * item.quantity
-        sync_positions.append({
-            "symbol": item.symbol,
-            "quantity": item.quantity,
-            "price": price
-        })
+        raise HTTPException(503, "清理模拟盘历史失败，请重试") from _e
 
     # 2. 计算同步后的”初始总资产”
     # 逻辑：我们将”可用现金”优先使用截图识别到的数值，如果没有则使用默认基数

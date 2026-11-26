@@ -9,12 +9,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm.attributes import set_committed_value
 
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.models.fund_snapshot import (
@@ -50,7 +50,7 @@ def _to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
         return default
 
 
-def _local_today() -> datetime.date:
+def _local_today() -> date:
     # Keep simple and deterministic; can be overridden by TZ env var.
     tz_name = os.getenv("SIM_FUND_SNAPSHOT_TZ", "Asia/Shanghai")
     try:
@@ -84,6 +84,42 @@ class SimulationFundSnapshotService:
     PERIODIC_SOURCE = PERIODIC_FUND_SOURCE
     #: EOD 日终来源标记（= EOD_FUND_SOURCE）
     EOD_SOURCE = EOD_FUND_SOURCE
+
+    @staticmethod
+    async def clear_user_daily(session, tenant_id: str, user_ids: set[str]) -> None:
+        """账户重新起算时，在同一事务清理用户级和分市场资金历史。"""
+        for snapshot in (SimulationFundSnapshot, SimulationMarketFundSnapshot):
+            await session.execute(
+                delete(snapshot).where(
+                    snapshot.tenant_id == tenant_id, snapshot.user_id.in_(user_ids)
+                )
+            )
+
+    @staticmethod
+    def _fund_dates(tenant_id: str, user_id: str):
+        return select(SimulationFundSnapshot.snapshot_date).where(
+            SimulationFundSnapshot.tenant_id == tenant_id,
+            SimulationFundSnapshot.user_id == user_id,
+        )
+
+    @staticmethod
+    def _cn_fund_snapshots(tenant_id: str, user_id: str):
+        other_market_exists = (
+            select(SimulationMarketFundSnapshot.id)
+            .where(
+                SimulationMarketFundSnapshot.tenant_id == tenant_id,
+                SimulationMarketFundSnapshot.user_id == user_id,
+                SimulationMarketFundSnapshot.snapshot_date
+                == SimulationFundSnapshot.snapshot_date,
+                SimulationMarketFundSnapshot.market != "CN",
+            )
+            .exists()
+        )
+        return select(SimulationFundSnapshot).where(
+            SimulationFundSnapshot.tenant_id == tenant_id,
+            SimulationFundSnapshot.user_id == user_id,
+            ~other_market_exists,
+        )
 
     @staticmethod
     def _read_settings_initial_cash(
@@ -485,10 +521,8 @@ class SimulationFundSnapshotService:
                 "market_value": bucket["market_value"],
                 "initial_capital": initial_capital,
                 "total_pnl": total_asset - initial_capital,
-                # 无历史基线时按 0 当日涨跌，避免把累计收益误画成单日收益
-                "today_pnl": (
-                    total_asset - day_open if day_open is not None else Decimal("0")
-                ),
+                "today_pnl": total_asset
+                - (day_open if day_open is not None else initial_capital),
                 "source": PERIODIC_FUND_SOURCE,
             }
             stmt = (
@@ -516,8 +550,9 @@ class SimulationFundSnapshotService:
             )
             await session.execute(stmt)
 
-    @staticmethod
+    @classmethod
     async def _market_day_open_equity(
+        cls,
         session,
         tenant_id: str,
         user_id: str,
@@ -526,40 +561,40 @@ class SimulationFundSnapshotService:
     ) -> Decimal | None:
         """该市场上一交易日总资产作为日初权益。
 
-        无分市场历史时，CN 回退用户级历史快照（口径改造前只有 A 股在用）；
-        仍无历史则返回 None，由调用方把当日涨跌记为 0。
+        CN 单市场日期使用用户级估值；无历史时以初始权益计算首日盈亏。
         """
         try:
             row = (
                 await session.execute(
-                    select(SimulationMarketFundSnapshot.total_asset)
+                    select(SimulationMarketFundSnapshot)
                     .where(
                         SimulationMarketFundSnapshot.tenant_id == tenant_id,
                         SimulationMarketFundSnapshot.user_id == str(user_id),
                         SimulationMarketFundSnapshot.market == market,
                         SimulationMarketFundSnapshot.snapshot_date < snap_date,
+                        SimulationMarketFundSnapshot.snapshot_date.in_(
+                            cls._fund_dates(tenant_id, user_id)
+                        ),
                     )
                     .order_by(SimulationMarketFundSnapshot.snapshot_date.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            if row is not None:
-                return _to_decimal(row)
             if market == "CN":
-                legacy = (
+                cn_fund = (
                     await session.execute(
-                        select(SimulationFundSnapshot.total_asset)
-                        .where(
-                            SimulationFundSnapshot.tenant_id == tenant_id,
-                            SimulationFundSnapshot.user_id == str(user_id),
-                            SimulationFundSnapshot.snapshot_date < snap_date,
-                        )
+                        cls._cn_fund_snapshots(tenant_id, user_id)
+                        .where(SimulationFundSnapshot.snapshot_date < snap_date)
                         .order_by(SimulationFundSnapshot.snapshot_date.desc())
                         .limit(1)
                     )
                 ).scalar_one_or_none()
-                if legacy is not None:
-                    return _to_decimal(legacy)
+                if cn_fund is not None and (
+                    row is None or cn_fund.snapshot_date >= row.snapshot_date
+                ):
+                    row = cn_fund
+            if row is not None:
+                return _to_decimal(row.total_asset)
         except Exception as exc:  # noqa: BLE001
             logger.debug("market day open lookup failed: %s", exc)
         return None
@@ -687,18 +722,15 @@ class SimulationFundSnapshotService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
-    @staticmethod
+    @classmethod
     async def list_market_daily(
+        cls,
         tenant_id: str,
         user_id: str,
         market: str = "CN",
         days: int = 30,
     ) -> list[SimulationFundSnapshot | SimulationMarketFundSnapshot]:
-        """分市场日快照（智能图表）。
-
-        CN 额外用历史用户级快照补齐本表上线前的日期（口径改造前只有 A 股主要
-        在用，用用户级快照兜底保持曲线连续）；已有分市场行的日期优先本表。
-        """
+        """读同一账户周期的分市场快照，A 股单市场日期使用用户级估值。"""
         market_norm = normalize_account_market(market)
         limit = max(1, min(days, 3650))
         async with get_session(read_only=True) as session:
@@ -710,6 +742,10 @@ class SimulationFundSnapshotService:
                             SimulationMarketFundSnapshot.tenant_id == tenant_id,
                             SimulationMarketFundSnapshot.user_id == user_id,
                             SimulationMarketFundSnapshot.market == market_norm,
+                            # 同批采集必有用户级快照，旧版本重置漏删的孤立行应跳过。
+                            SimulationMarketFundSnapshot.snapshot_date.in_(
+                                cls._fund_dates(tenant_id, user_id)
+                            ),
                         )
                         .order_by(SimulationMarketFundSnapshot.snapshot_date.desc())
                         .limit(limit)
@@ -718,31 +754,32 @@ class SimulationFundSnapshotService:
                 .scalars()
                 .all()
             )
-        merged: list[SimulationFundSnapshot | SimulationMarketFundSnapshot] = list(rows)
-        if market_norm == "CN" and len(merged) < limit:
-            existing_dates = {row.snapshot_date for row in merged}
-            async with get_session(read_only=True) as session:
-                legacy_rows = (
-                    (
-                        await session.execute(
-                            select(SimulationFundSnapshot)
-                            .where(
-                                SimulationFundSnapshot.tenant_id == tenant_id,
-                                SimulationFundSnapshot.user_id == user_id,
-                            )
-                            .order_by(SimulationFundSnapshot.snapshot_date.desc())
-                            .limit(limit)
-                        )
-                    )
-                    .scalars()
-                    .all()
+            merged: dict[
+                date, SimulationFundSnapshot | SimulationMarketFundSnapshot
+            ] = {row.snapshot_date: row for row in rows}
+            if market_norm == "CN":
+                # 兼容分市场快照上线前的 A 股历史，并优先使用单市场账户的日终估值。
+                cn_fund_rows = await session.execute(
+                    cls._cn_fund_snapshots(tenant_id, user_id)
+                    .order_by(SimulationFundSnapshot.snapshot_date.desc())
+                    .limit(limit)
                 )
-            for row in legacy_rows:
-                if row.snapshot_date not in existing_dates:
-                    merged.append(row)
-                    existing_dates.add(row.snapshot_date)
-        merged.sort(key=lambda row: row.snapshot_date, reverse=True)
-        return merged[:limit]
+                merged.update(
+                    (row.snapshot_date, row) for row in cn_fund_rows.scalars()
+                )
+
+            daily = [merged[day] for day in sorted(merged, reverse=True)[:limit]]
+            if daily and isinstance(first := daily[-1], SimulationMarketFundSnapshot):
+                # 图表首点使用 today_pnl。旧版本该值可能仍带着已跳过的重置前基线。
+                day_open = await cls._market_day_open_equity(
+                    session, tenant_id, user_id, market_norm, first.snapshot_date
+                )
+                if day_open is None:
+                    day_open = _to_decimal(first.initial_capital)
+                set_committed_value(
+                    first, "today_pnl", float(_to_decimal(first.total_asset) - day_open)
+                )
+            return daily
 
 
 class SimulationFundSnapshotWorker:
