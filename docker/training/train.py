@@ -348,6 +348,7 @@ def _apply_label_formula_overrides(cfg: dict) -> None:
     if applied:
         logger.info("Label formula overrides: %s", applied)
 
+from data.integrity import assert_no_feature_leak, overfit_diagnostics
 from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
 from data.splits import (
     _EXECUTION_LAG_DAYS,
@@ -357,6 +358,27 @@ from data.splits import (
     feature_clip_for,
 )
 from model_trainers.predict import _predict_with_model
+
+
+#: 需要滚动时序窗口的模型（与 capabilities.sequence=True 的 6 个一致）。
+_SEQUENCE_MODEL_TYPES: frozenset[str] = frozenset(
+    {"gru", "lstm", "alstm", "transformer", "tcn", "nativetft"}
+)
+
+
+def _warn_sequence_preprocessing(model_type: str, prep_cfg: dict | None) -> None:
+    """序列模型 + 未启用截面预处理 → 告警（不阻断）。
+
+    DL 的标准化是「训练段全局 mean/std」，厚尾因子会把正常值压到 0 附近；
+    `feature_clip_for` 的 ±1e14 裁剪只覆盖 linear/mlp/tabnet，不覆盖序列模型。
+    """
+    if model_type in _SEQUENCE_MODEL_TYPES and not bool((prep_cfg or {}).get("enabled")):
+        logger.warning(
+            "序列模型 %s 未启用截面预处理：DL 标准化为训练段全局 mean/std，"
+            "厚尾因子会压缩正常值。建议开启 preprocessing.standardize=rank "
+            "或 winsor+zscore（本轮不改变默认值）。",
+            model_type,
+        )
 
 
 TRAINING_BASE_FEATURES: list[str] = [
@@ -619,6 +641,8 @@ def _predict_chunked_frame(
 def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict | None = None,
                 need_full_pred: bool = True) -> tuple:
     """统一训练入口：根据 model_type 路由到对应训练函数。"""
+    # 前视泄漏硬闸：label / fwd_ret / future_ret 等列不得作为特征。
+    assert_no_feature_leak(features)
     model_cfg = cfg.get("model", {})
     _optuna_result = None
     model_type = str(model_cfg.get("type", "lightgbm")).strip().lower()
@@ -653,8 +677,10 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
             len(pd.unique(_rank_groups[0])),
             len(pd.unique(_rank_groups[1])),
         )
+    _prep_cfg = cfg.get("preprocessing") or {}
+    _warn_sequence_preprocessing(model_type, _prep_cfg)
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
-        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
+        train_df, val_df, features, prep_cfg=_prep_cfg,
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
     )
     _trim_memory("after prepare")
@@ -730,6 +756,34 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
 
     logger.info(f"Train IC={train_m['ic']:.4f}  RankIC={train_m['rank_ic']:.4f}")
     logger.info(f"Val   IC={val_m['ic']:.4f}    RankIC={val_m['rank_ic']:.4f}  ICIR={val_m['rank_icir']:.4f}")
+
+    # 过拟合诊断（单模型入口也留痕；多模型入口另写入 comparison）。
+    _best_iter = getattr(model, "best_iteration", None)
+    if _best_iter is None and hasattr(model, "get_best_iteration"):
+        try:
+            _best_iter = model.get_best_iteration()
+        except Exception:  # noqa: BLE001 - 诊断字段，取不到不影响训练
+            _best_iter = None
+    _diag = overfit_diagnostics(
+        train_m,
+        val_m,
+        best_iteration=_best_iter,
+        num_boost_round=(
+            int(model_cfg.get("num_boost_round", 1000) or 1000)
+            if model_type in ("lightgbm", "xgboost", "catboost")
+            else None
+        ),
+    )
+    if _diag["overfit_flags"]:
+        logger.warning(
+            "过拟合诊断 %s: %s（train_rank_ic=%s val_rank_ic=%s gap=%s best_iter=%s）",
+            model_type,
+            ", ".join(_diag["overfit_flags"]),
+            _diag["train_rank_ic"],
+            _diag["val_rank_ic"],
+            _diag["rank_ic_gap"],
+            _diag["best_iteration"],
+        )
 
     # 生成全窗口预测（label_return 若在：评估报告的真实收益口径）
     _trim_memory("before full-pred")
@@ -811,8 +865,11 @@ def _tune_tree_hyperparams(
             params.update({
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "num_leaves": trial.suggest_int("num_leaves", 15, 127),
-                "min_child_samples": trial.suggest_int("min_child_samples", 20, 500),
-                "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 0.9),
+                # 机构基线 min_data_in_leaf=500：搜索区间必须覆盖其上方，
+                # 20–500 只会把模型推向更细的叶子（8M 行面板过拟合）。
+                "min_child_samples": trial.suggest_int("min_child_samples", 200, 2000),
+                # 高维因子库（1000+ 列）需要 0.15–0.3 的低采样率，旧区间 0.4 起搜不到。
+                "feature_fraction": trial.suggest_float("feature_fraction", 0.15, 0.9),
                 "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 0.9),
                 "lambda_l1": trial.suggest_float("lambda_l1", 0.0, 5.0),
                 "lambda_l2": trial.suggest_float("lambda_l2", 0.0, 10.0),
@@ -824,7 +881,8 @@ def _tune_tree_hyperparams(
                 "max_depth": trial.suggest_int("max_depth", 3, 8),
                 "subsample": trial.suggest_float("subsample", 0.5, 0.9),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 0.9),
-                "min_child_weight": trial.suggest_int("min_child_weight", 20, 300),
+                # 与 LGB min_data_in_leaf 同口径：100–2000（旧上限 300 低于新基线 500）
+                "min_child_weight": trial.suggest_int("min_child_weight", 100, 2000),
                 "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 5.0),
             })
             model = _train_xgb({**cfg, "model": {**cfg.get("model", {}), "xgb_params": {**cfg.get("model", {}).get("xgb_params", {}), **params}}}, features, X_train, y_train, X_val, y_val)
@@ -832,7 +890,7 @@ def _tune_tree_hyperparams(
             params.update({
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "depth": trial.suggest_int("depth", 4, 10),
-                "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0, log=True),
+                "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 50.0, log=True),
                 "random_strength": trial.suggest_float("random_strength", 0.5, 5.0),
             })
             model = _train_catboost({**cfg, "model": {**cfg.get("model", {}), "catboost_params": {**cfg.get("model", {}).get("catboost_params", {}), **params}}}, features, X_train, y_train, X_val, y_val)
@@ -891,8 +949,10 @@ def _train_single_model(
             train_df["trade_date"].to_numpy(),
             val_df["trade_date"].to_numpy(),
         )
+    _prep_cfg = cfg.get("preprocessing") or {}
+    _warn_sequence_preprocessing(model_type, _prep_cfg)
     fill_values, X_train, y_train, X_val, y_val, _fill = _prepare_arrays(
-        train_df, val_df, features, prep_cfg=cfg.get("preprocessing") or {},
+        train_df, val_df, features, prep_cfg=_prep_cfg,
         extra_frames=[test_df, df], clip_value=feature_clip_for(model_type),
     )
     _sample_weight = _maybe_build_sample_weights(cfg, train_df, val_df)
@@ -1010,6 +1070,8 @@ def train_multi_models(
     - comparison: 对比报告
     - primary_model_type: 最佳模型类型
     """
+    # 前视泄漏硬闸：与 train_model 同一口径（多模型入口单独覆盖）。
+    assert_no_feature_leak(features)
     model_cfg = cfg.get("model", {})
     model_types_raw = model_cfg.get("types", [model_cfg.get("type", "lightgbm")])
     if isinstance(model_types_raw, str):
@@ -1051,8 +1113,27 @@ def train_multi_models(
 
     # 生成对比报告
     comparison_rows = []
+    _num_boost_round = int(model_cfg.get("num_boost_round", 1000) or 1000)
     for mt, res in model_results.items():
         vm = res["val_m"]
+        # 过拟合诊断：train/val rank IC 差 + 早停轮次比例（只标记，不自动改参）
+        _diag = overfit_diagnostics(
+            res.get("train_m") or {},
+            vm,
+            best_iteration=res.get("best_iteration"),
+            num_boost_round=_num_boost_round if mt in ("lightgbm", "xgboost", "catboost") else None,
+        )
+        res["diagnostics"] = _diag
+        if _diag["overfit_flags"]:
+            logger.warning(
+                "过拟合诊断 %s: %s（train_rank_ic=%s val_rank_ic=%s gap=%s best_iter=%s）",
+                mt,
+                ", ".join(_diag["overfit_flags"]),
+                _diag["train_rank_ic"],
+                _diag["val_rank_ic"],
+                _diag["rank_ic_gap"],
+                _diag["best_iteration"],
+            )
         comparison_rows.append({
             "model_type": mt,
             "val_ic": round(vm["ic"], 6),
@@ -1063,6 +1144,11 @@ def train_multi_models(
             "test_ic": round(res["test_m"]["ic"], 6),
             "test_rank_ic": round(res["test_m"]["rank_ic"], 6),
             "test_rank_icir": round(res["test_m"]["rank_icir"], 4),
+            "train_rank_ic": None if _diag["train_rank_ic"] is None else round(_diag["train_rank_ic"], 6),
+            "rank_ic_gap": None if _diag["rank_ic_gap"] is None else round(_diag["rank_ic_gap"], 6),
+            "best_iteration": _diag["best_iteration"],
+            "best_iter_ratio": _diag["best_iter_ratio"],
+            "overfit_flags": _diag["overfit_flags"],
             "elapsed_seconds": round(res["elapsed"], 1),
         })
 
@@ -1099,9 +1185,9 @@ def _generate_oof_predictions(
 
     返回与 train_df 等长的 OOF 预测（fold 未覆盖部分为 NaN）。
 
-    标签是未来 h 日收益（cfg.label.target_horizon_days），因此训练集末尾 h 个
-    交易日必须 purge 掉：它们的标签窗口与验证集重叠，否则元模型在验证/测试上
-    的评估会被高估。
+    标签是未来 h 日收益（cfg.label.target_horizon_days），且最早 T+1 执行，
+    因此训练集末尾必须 purge 掉 h + 1 个交易日：它们的标签窗口与验证集重叠，
+    否则元模型在验证/测试上的评估会被高估。
     """
     dates = sorted(train_df["trade_date"].unique())
     n_dates = len(dates)
@@ -1110,7 +1196,8 @@ def _generate_oof_predictions(
         n_folds = max(1, n_dates - 1)
 
     horizon = int((cfg.get("label", {}) or {}).get("target_horizon_days") or 1)
-    purge = max(0, horizon)
+    # 与主切分/embargo 同口径：标签跨 h 日 + T+1 执行滞后，purge 必须含 lag。
+    purge = max(0, horizon + _EXECUTION_LAG_DAYS)
     fold_size = n_dates // (n_folds + 1)
     oof_pred = pd.Series(np.nan, index=train_df.index, name="oof_pred")
 

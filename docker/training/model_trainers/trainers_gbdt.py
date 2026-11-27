@@ -26,58 +26,14 @@ def _default_train_threads() -> int:
 
 _TRAIN_NTHREAD = _default_train_threads()
 
-DEFAULT_LGB_PARAMS: dict[str, Any] = {
-    # 机构级起点（2026-11-09）：按 A 股日频选股的稳健区间取中值；
-    # 这是起点不是调参终点，payload 的 params 可逐项覆盖。
-    "objective":         "regression",
-    "metric":            "l2",
-    "boosting":          "gbdt",
-    "num_leaves":        31,
-    "learning_rate":     0.03,
-    "feature_fraction":  0.7,
-    "bagging_fraction":  0.8,
-    "bagging_freq":      1,
-    "min_data_in_leaf":  500,
-    "path_smooth":       1.0,
-    "lambda_l1":         0.5,
-    "lambda_l2":         5.0,
-    "max_depth":         6,
-    # LightGBM 原生 API 的线程参数名是 num_threads（n_jobs 是 sklearn 层的别名，
-    # 直接传 n_jobs 给 lgb.train() 会被忽略并回退到默认线程数，导致多核不生效）
-    "num_threads":       _TRAIN_NTHREAD,
-    "verbosity":         -1,
-}
-
-DEFAULT_XGB_PARAMS: dict[str, Any] = {
-    # 机构级起点（2026-11-09）：hist + 0.03 lr + 深度 5 + 强正则
-    "objective":        "reg:squarederror",
-    "eval_metric":      "rmse",
-    "max_depth":        5,
-    "learning_rate":    0.03,
-    "subsample":        0.8,
-    "colsample_bytree": 0.8,
-    "reg_alpha":        0.5,
-    "reg_lambda":       10.0,
-    "min_child_weight": 100,
-    "tree_method":      "hist",
-    "nthread":          -1,
-    "verbosity":        0,
-}
-
-DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
-    # 机构级起点（2026-11-09）：深度 5 + l2 10 + 2000 轮 + 早停 100
-    "loss_function":    "RMSE",
-    "depth":            5,
-    "learning_rate":    0.03,
-    "iterations":       2000,
-    "l2_leaf_reg":      10.0,
-    "random_strength":  2.0,
-    "bagging_temperature": 1.0,
-    "od_type":          "Iter",
-    "od_wait":          100,
-    "thread_count":     -1,
-    "verbose":          100,
-}
+# 机构基准单源：model_trainers/defaults.py（纯常量，测试与编排层可直接导入）。
+# 线程参数由本模块在各训练器入口按 _TRAIN_NTHREAD 覆盖。
+from model_trainers.defaults import (  # noqa: E402  (保持原常量块位置)
+    DEFAULT_CATBOOST_PARAMS,
+    DEFAULT_LGB_PARAMS,
+    DEFAULT_XGB_PARAMS,
+)
+from model_trainers.feature_roles import categorical_feature_names  # noqa: E402
 
 # 排序损失集合的单一事实源在 backend/shared/training/capabilities.py；
 # 旧兼容镜像无 /app/backend 时降级为本地常量（值与单一事实源逐字一致）。
@@ -165,6 +121,14 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
     num_boost_round = int(model_cfg.get("num_boost_round", 1000))
     early_stopping_rounds = max(1, int(model_cfg.get("early_stopping_rounds", 100) or 100))
 
+    # 行业码按类别处理（否则被当数值序数）；无类别列时不传该参数，保持旧口径。
+    _cat_feats = categorical_feature_names(features)
+    _ds_cat_kw: dict[str, Any] = (
+        {"categorical_feature": _cat_feats} if _cat_feats else {}
+    )
+    if _cat_feats:
+        logger.info("LightGBM categorical_feature: %s", ", ".join(_cat_feats))
+
     if _rank:
         gtr, gva = groups
         # lambdarank 只吃整数 relevance；rank_xendcg 支持连续标签
@@ -172,23 +136,32 @@ def _train_lgb(cfg: dict, features: list[str], X_train: np.ndarray, y_train: np.
         y_va = _bin_rank_labels(y_val, gva) if _objective == "lambdarank" else y_val
         ds_train = lgb.Dataset(
             X_train, label=y_tr, group=_group_counts(gtr),
-            weight=w_train, feature_name=features, free_raw_data=True,
+            weight=w_train, feature_name=features, free_raw_data=True, **_ds_cat_kw,
         )
         ds_val = lgb.Dataset(
             X_val, label=y_va, group=_group_counts(gva),
             weight=w_val, feature_name=features, reference=ds_train, free_raw_data=True,
+            **_ds_cat_kw,
         )
         logger.info(
             "LightGBM rank loss: objective=%s train_groups=%d val_groups=%d",
             _objective, len(np.unique(np.asarray(gtr))), len(np.unique(np.asarray(gva))),
         )
     else:
-        ds_train = lgb.Dataset(X_train, label=y_train, weight=w_train, feature_name=features, free_raw_data=True)
-        ds_val = lgb.Dataset(X_val, label=y_val, weight=w_val, feature_name=features, free_raw_data=True)
+        ds_train = lgb.Dataset(X_train, label=y_train, weight=w_train, feature_name=features, free_raw_data=True, **_ds_cat_kw)
+        ds_val = lgb.Dataset(X_val, label=y_val, weight=w_val, feature_name=features, free_raw_data=True, **_ds_cat_kw)
 
 
     callbacks = [
-        lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
+        # 只按第一个指标早停（排序任务=ndcg，回归=l2）。valid_sets 里还有
+        # feval rank_ic；不设 first_metric_only 时 LightGBM 会对多个指标分别
+        # 检查，任一停滞即停，早停轮次不再由目标指标决定（与旧注释「以 l2
+        # 为准」不符）。rank_ic 仅作日志监控，不参与早停。
+        lgb.early_stopping(
+            stopping_rounds=early_stopping_rounds,
+            verbose=True,
+            first_metric_only=True,
+        ),
         lgb.log_evaluation(100),
     ]
     # 补充监控 rank_ic（不影响早停，仅日志），帮助判断是否只优化 l2 而 rank_ic 停滞

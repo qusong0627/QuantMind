@@ -53,7 +53,9 @@ ALGO_FRAMEWORKS: dict[str, str] = {
     "tabnet": "pytorch",
     "tcn": "pytorch",
     "nativetft": "pytorch",
-    "mlp": "pytorch",
+    # mlp 走 sklearn MLPRegressor/MLPClassifier（见 capabilities.MODEL_FRAMEWORK），
+    # 落盘是 pickle；旧值 "pytorch" 只影响拆分 metadata 的展示口径，已统一。
+    "mlp": "sklearn",
 }
 
 # 父 metadata 里属于「主算法」私有的字段：拆分子模型时先剔除再按算法重建，

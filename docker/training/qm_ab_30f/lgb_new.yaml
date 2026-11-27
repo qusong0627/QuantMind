@@ -1,0 +1,97 @@
+run_id: qm_ab30_lgb_new_20261127
+job_name: qm_ab30_lgb_new
+seed: 42
+
+data:
+  train_start: "2022-01-01"
+  train_end: "2024-09-30"
+  factor_source: l1_factors
+  quantdb_dir: /data/quantdb
+  local_dir: /data/quantdb
+  source_mode: LOCAL
+  pool_symbols: null
+  features:
+    - turn_1
+    - turn_5
+    - turn_20
+    - turn_z_20
+    - turn_ratio_1_5
+    - turn_std_20
+    - mom_ret_1d
+    - mom_ret_3d
+    - mom_ret_5d
+    - mom_ret_10d
+    - mom_ret_20d
+    - mom_ret_60d
+    - mom_ma_gap_5
+    - mom_ma_gap_20
+    - mom_rsi_6
+    - mom_macd_hist
+    - vol_std_5
+    - vol_std_20
+    - vol_atr_14
+    - vol_amp_1
+    - vol_amp_20
+    - amt_log
+    - amt_z_20
+    - amt_ratio_1_5
+    - amt_ratio_1_20
+    - amt_net_flow_5
+    - fun_float_mv
+    - fun_mv_rank
+    - fun_pe
+    - fun_bp
+
+split:
+  train: ["2022-01-01", "2024-09-30"]
+  valid: ["2024-10-06", "2025-09-30"]
+  test: ["2025-10-06", "2026-10-31"]
+
+label:
+  target_horizon_days: 5
+  target_mode: return
+  label_transform: rank
+  execution_price: close
+  effective_trade_date: ""
+  training_window: ""
+
+model:
+  type: lightgbm
+  num_boost_round: 1000
+  early_stopping_rounds: 50
+  val_ratio: null
+  ensemble: none
+  params:
+    objective: regression
+    metric: l2
+    learning_rate: 0.03
+    num_leaves: 31
+    max_depth: 6
+    min_data_in_leaf: 500
+    bagging_freq: 1
+    lambda_l1: 0.5
+    lambda_l2: 5.0
+    feature_fraction: 0.7
+    bagging_fraction: 0.8
+
+context:
+  deal_price: close
+  market: CN
+
+factor_selection:
+  method: ""
+
+explain:
+  enable_shap: false
+
+drift:
+  enabled: false
+
+output:
+  workspace: /data/qm_ab_30f/new
+  result_path: /data/qm_ab_30f/new/result.json
+
+cache:
+  dir: /tmp/qm_train_cache
+
+max_time_minutes: 60

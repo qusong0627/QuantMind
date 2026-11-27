@@ -1,0 +1,117 @@
+run_id: qm_ab30_all13_20261127
+job_name: qm_ab30_all13
+seed: 42
+
+data:
+  train_start: "2022-01-01"
+  train_end: "2024-09-30"
+  factor_source: l1_factors
+  quantdb_dir: /data/quantdb
+  local_dir: /data/quantdb
+  source_mode: LOCAL
+  pool_symbols: null
+  features:
+    - turn_1
+    - turn_5
+    - turn_20
+    - turn_z_20
+    - turn_ratio_1_5
+    - turn_std_20
+    - mom_ret_1d
+    - mom_ret_3d
+    - mom_ret_5d
+    - mom_ret_10d
+    - mom_ret_20d
+    - mom_ret_60d
+    - mom_ma_gap_5
+    - mom_ma_gap_20
+    - mom_rsi_6
+    - mom_macd_hist
+    - vol_std_5
+    - vol_std_20
+    - vol_atr_14
+    - vol_amp_1
+    - vol_amp_20
+    - amt_log
+    - amt_z_20
+    - amt_ratio_1_5
+    - amt_ratio_1_20
+    - amt_net_flow_5
+    - fun_float_mv
+    - fun_mv_rank
+    - fun_pe
+    - fun_bp
+
+split:
+  train: ["2022-01-01", "2024-09-30"]
+  valid: ["2024-10-06", "2025-09-30"]
+  test: ["2025-10-06", "2026-10-31"]
+
+label:
+  target_horizon_days: 5
+  target_mode: return
+  label_transform: rank
+  execution_price: close
+  effective_trade_date: ""
+  training_window: ""
+
+model:
+  type: lightgbm
+  types:
+    - lightgbm
+    - xgboost
+    - catboost
+    - linear
+    - random_forest
+    - mlp
+    - gru
+    - lstm
+    - alstm
+    - transformer
+    - tcn
+    - tabnet
+    - nativetft
+  num_boost_round: 1000
+  early_stopping_rounds: 50
+  val_ratio: null
+  ensemble: none
+  prediction_mode: point
+  # 留空 = 走训练容器里的机构默认值（defaults.py）：
+  # LGB lr0.03/leaves31/depth6/min_data500/L2 5；XGB depth5/min_child500/L2 10；
+  # CatBoost depth5/l2 10/2000 iterations。
+  params: {}
+  xgb_params: {}
+  catboost_params: {}
+  dl_params:
+    # CPU/GPU 快筛口径：30 epoch + 早停 10，不是生产收敛轮数（生产默认 200）。
+    n_epochs: 30
+    batch_size: 4096
+    dl_step_len: 20
+    early_stopping_rounds: 10
+    # 13 模型共用一个 hidden_size：64。单独跑 MLP/TCN 时前端会用 128。
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.2
+
+context:
+  deal_price: close
+  market: CN
+  benchmark: SH000300
+
+factor_selection:
+  method: ""
+
+explain:
+  enable_shap: false
+
+drift:
+  enabled: false
+
+output:
+  workspace: /data/qm_ab_30f/all13
+  result_path: /data/qm_ab_30f/all13/result.json
+
+cache:
+  dir: /tmp/qm_train_cache
+
+max_time_minutes: 360

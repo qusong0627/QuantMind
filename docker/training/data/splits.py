@@ -11,6 +11,7 @@ import math
 import numpy as np
 import pandas as pd
 
+from data.integrity import time_integrity_report
 from data.memprobe import log_rss, peak_gb, reset_peak, rss_gb
 
 logger = logging.getLogger("quantmind.train")
@@ -122,9 +123,13 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
         if embargo and _embargo_days > 0 and n_before:
             days = np.sort(df.loc[mask, "trade_date"].unique())
             if len(days) <= _embargo_days:
-                logger.warning(
-                    "Embargo skipped for %s: only %d trading days <= label span %d",
-                    name, len(days), _embargo_days,
+                # 机构级 fail-closed：短段无法裁 embargo 时，尾部样本的标签会
+                # 跨入下一段（前视泄漏）。旧实现只告警并跳过，等于静默放行。
+                raise RuntimeError(
+                    f"Embargo 无法应用：{name} 段仅 {len(days)} 个交易日 <= "
+                    f"标签跨度 {_embargo_days}（horizon+执行滞后）。"
+                    "该段尾部标签会跨入下一段，属于前视泄漏。"
+                    "请扩大该段窗口或降低 target_horizon_days。"
                 )
             else:
                 mask = mask & (df["trade_date"] < days[-_embargo_days])
@@ -252,6 +257,17 @@ def _split_data(df: pd.DataFrame, cfg: dict) -> tuple:
             f"test={len(test_df)}({_frame_range_text(test_df)}) requested={requested_test}. "
             "请调整 train/valid/test 时间窗口，确保三段均与可用数据重叠。"
         )
+
+    # 机构级时点护栏：三段顺序与 embargo 间隔复核。不足即失败（不是告警）——
+    # 训练段尾部标签跨入验证段是前视泄漏，宁可中止训练。
+    time_integrity_report(
+        train_df,
+        val_df,
+        test_df,
+        all_dates=df["trade_date"].unique(),
+        horizon=_horizon,
+        lag=_EXECUTION_LAG_DAYS,
+    )
     return train_df, val_df, test_df
 
 

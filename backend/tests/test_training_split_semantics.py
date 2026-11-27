@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import functools
-import logging
 import sys
 from pathlib import Path
 
@@ -159,29 +158,30 @@ def test_embargo_cutoff_uses_segment_own_calendar() -> None:
     assert pd.DatetimeIndex(sorted(val_df["trade_date"].unique())).equals(days[20 : 40 - _EMBARGO_DAYS])
 
 
-def test_embargo_skipped_when_segment_too_short(caplog) -> None:
+def test_rejects_segment_too_short_for_embargo() -> None:
+    """短段无法裁 embargo 时必须失败：尾部标签会跨入下一段（前视泄漏）。
+
+    旧实现只告警并跳过裁剪，等于静默放行；机构级口径改为 fail-closed。
+    """
     df = _make_frame()
     cfg = _explicit_cfg(df, range(0, 30), range(30, 34), range(40, 60))  # val 仅 4 天 < 6
 
-    with caplog.at_level(logging.WARNING, logger="quantmind.train"):
-        _, val_df, _ = _split_data(df, cfg)
-
-    assert len(val_df) == 4 * 3  # 未裁剪
-    assert any("Embargo skipped" in r.message for r in caplog.records)
+    with pytest.raises(RuntimeError, match="Embargo 无法应用"):
+        _split_data(df, cfg)
 
 
 def test_val_ratio_mode_makes_three_way_split_with_embargo() -> None:
-    df = _make_frame(n_days=60)
+    df = _make_frame(n_days=120)
     cfg = {"model": {"val_ratio": 0.2}, "label": {"target_horizon_days": _HORIZON}}
 
     train_df, val_df, test_df = _split_data(df, cfg)
 
     days = pd.DatetimeIndex(sorted(df["trade_date"].unique()))
-    # 60 天：val_start_idx=48，test_start_idx=54
-    assert pd.DatetimeIndex(sorted(val_df["trade_date"].unique()))[0] == days[48]
-    assert pd.DatetimeIndex(sorted(test_df["trade_date"].unique()))[0] == days[54]
+    # 120 天：val_start_idx=96，test_start_idx=108（val 12 天，足够裁 6 天）
+    assert pd.DatetimeIndex(sorted(val_df["trade_date"].unique()))[0] == days[96]
+    assert pd.DatetimeIndex(sorted(test_df["trade_date"].unique()))[0] == days[108]
     # train 裁尾 6 天
-    assert pd.DatetimeIndex(sorted(train_df["trade_date"].unique())).equals(days[0 : 48 - _EMBARGO_DAYS])
+    assert pd.DatetimeIndex(sorted(train_df["trade_date"].unique())).equals(days[0 : 96 - _EMBARGO_DAYS])
     assert train_df["trade_date"].max() < val_df["trade_date"].min() < test_df["trade_date"].max()
 
 
@@ -218,7 +218,7 @@ def test_empty_segment_raises_with_available_range() -> None:
         "label": {"target_horizon_days": _HORIZON},
         "split": {
             "train": [str(days[0].date()), str(days[9].date())],
-            "valid": [str(days[10].date()), str(days[14].date())],
+            "valid": [str(days[10].date()), str(days[17].date())],
             "test": ["2021-01-01", "2021-06-30"],  # 越出可用窗口 → 空段
         },
     }
@@ -248,7 +248,7 @@ def test_each_segment_is_row_selected_exactly_once_from_source(monkeypatch) -> N
 
 
 def test_val_ratio_mode_also_row_selects_once_per_segment(monkeypatch) -> None:
-    df = _make_frame()
+    df = _make_frame(n_days=120)
     cfg = {"model": {"val_ratio": 0.2}, "label": {"target_horizon_days": _HORIZON}}
     sizes = _spy_row_takes(monkeypatch)
 

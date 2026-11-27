@@ -14,6 +14,7 @@ import torch
 
 from data.splits import feature_clip_for
 from model_trainers.metrics import _compute_metrics
+from model_trainers.structure import tcn_structure_guard
 
 logger = logging.getLogger("quantmind.train")
 
@@ -344,6 +345,25 @@ def _train_dl(
     early_stop  = int(dl_params.get("early_stopping_rounds", 20))
     metric_name = str(dl_params.get("metric", "")).lower()
 
+    # TCN 结构适配：感受野必须盖住 step_len，否则模型看不全窗口。
+    # 只告警并写元数据，不静默改写用户显式参数。
+    _tcn_guard: dict[str, Any] | None = None
+    if model_type == "tcn":
+        _tcn_guard = tcn_structure_guard(
+            int(model_params.get("kernel_size", 5)),
+            int(model_params.get("num_layers", 2)),
+            step_len,
+        )
+        if not _tcn_guard["covers_window"]:
+            logger.warning(
+                "TCN 感受野 %d < step_len %d：模型看不到完整窗口。"
+                "建议 num_layers=%s（或 kernel_size=%s）。当前参数会被原样训练。",
+                _tcn_guard["receptive_field"],
+                step_len,
+                _tcn_guard["suggested_num_layers"],
+                _tcn_guard["suggested_kernel_size"],
+            )
+
     # 确定 GPU 和训练参数
     # 所有 Qlib DL 模型（GRU/LSTM/ALSTM/TransformerModel/TCN/TabnetModel）都接受 GPU/n_epochs/lr/batch_size/early_stop/metric
     gpu_id = 0
@@ -558,6 +578,9 @@ def _train_dl(
             "mean": [float(v) for v in _fm],
             "std": [float(v) for v in _fs],
         }
+    # TCN 结构适配审计（感受野 vs step_len；不足时训练照常，仅记录）
+    if _tcn_guard is not None:
+        dl_metadata["structure_guard"] = _tcn_guard
 
     # 计算指标：train/val 用模型预测算真实 rmse/auc（不再硬编码 NaN）
     # test 指标由 train_model 基于 test_df 计算。

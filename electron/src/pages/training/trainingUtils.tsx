@@ -862,17 +862,21 @@ export const DEFAULT_PARAMS: TrainingParams = {
   model_types: ['lightgbm'],
   prediction_mode: 'point',
   ensemble_method: 'none',
-  learning_rate: 0.02,
+  // 机构基准（2026-11-27）：与训练容器
+  // docker/training/model_trainers/defaults.py 的 DEFAULT_* 对齐。
+  // 注意：本页会把这些键全量写进载荷，后端 DEFAULT_* 只在缺键时兜底——
+  // 这里就是实际生效值，改这里等于改所有新建草稿的训练默认。
+  learning_rate: 0.03,
   num_leaves: 31,
-  max_depth: -1,
-  min_data_in_leaf: 300,
+  max_depth: 6,
+  min_data_in_leaf: 500,
   path_smooth: 1.0,
-  bagging_freq: 5,
+  bagging_freq: 1,
   lambda_l1: 0.5,
-  lambda_l2: 1.0,
+  lambda_l2: 5.0,
   feature_fraction: 0.7,
   bagging_fraction: 0.8,
-  num_boost_round: 2000,
+  num_boost_round: 1000,
   early_stopping_rounds: 50,
   objective: 'regression',
   metric: 'l2',
@@ -887,19 +891,22 @@ export const DEFAULT_PARAMS: TrainingParams = {
   sampleTradeableMask: false,
   sampleExcludeST: false,
   sampleDecayHalfLifeDays: 0,
-  // XGBoost
-  xgb_max_depth: 4,
-  xgb_subsample: 0.7,
-  xgb_colsample_bytree: 0.65,
+  // XGBoost（与后端 DEFAULT_XGB_PARAMS 对齐；min_child_weight 与 LGB
+  // min_data_in_leaf=500 同口径：平方损失下 hessian≈1/样本）
+  xgb_max_depth: 5,
+  xgb_subsample: 0.8,
+  xgb_colsample_bytree: 0.8,
   xgb_reg_alpha: 0.5,
-  xgb_reg_lambda: 2.0,
-  xgb_min_child_weight: 100,
-  // CatBoost
-  cb_depth: 6,
-  cb_l2_leaf_reg: 3.0,
-  cb_random_strength: 1.5,
-  cb_bagging_temperature: 0.8,
+  xgb_reg_lambda: 10.0,
+  xgb_min_child_weight: 500,
+  // CatBoost（与后端 DEFAULT_CATBOOST_PARAMS 对齐；iterations 独立于
+  // LGB/XGB 的 num_boost_round，保持后端 2000 起点）
+  cb_depth: 5,
+  cb_l2_leaf_reg: 10.0,
+  cb_random_strength: 2.0,
+  cb_bagging_temperature: 1.0,
   cb_od_wait: 100,
+  cb_iterations: 2000,
   // Linear
   linear_alpha: 3.0,
   // RandomForest
@@ -927,7 +934,7 @@ export const MODEL_DL_DEFAULTS: Record<string, Partial<TrainingParams>> = {
     dl_hidden_size: 64,
     dl_num_layers: 2,
     dl_dropout: 0.2,
-    dl_lr: 0.001,
+    dl_lr: 0.0003,
     dl_batch_size: 4000,
     dl_n_epochs: 200,
     dl_step_len: 20,
@@ -936,7 +943,7 @@ export const MODEL_DL_DEFAULTS: Record<string, Partial<TrainingParams>> = {
     dl_hidden_size: 64,
     dl_num_layers: 2,
     dl_dropout: 0.2,
-    dl_lr: 0.001,
+    dl_lr: 0.0003,
     dl_batch_size: 4000,
     dl_n_epochs: 200,
     dl_step_len: 20,
@@ -945,7 +952,7 @@ export const MODEL_DL_DEFAULTS: Record<string, Partial<TrainingParams>> = {
     dl_hidden_size: 64,
     dl_num_layers: 2,
     dl_dropout: 0.2,
-    dl_lr: 0.001,
+    dl_lr: 0.0003,
     dl_batch_size: 4000,
     dl_n_epochs: 200,
     dl_step_len: 20,
@@ -984,6 +991,17 @@ export const MODEL_DL_DEFAULTS: Record<string, Partial<TrainingParams>> = {
     dl_lr: 0.0005,
     dl_batch_size: 4000,
     dl_n_epochs: 200,
+    dl_step_len: 20,
+  },
+  // MLP 走 sklearn MLPRegressor/MLPClassifier（非 pytorch）：hidden_size 128 →
+  // 后端展开为 [128, 64]；lr/epochs 与后端实现默认一致（1e-3 / 500）。
+  mlp: {
+    dl_hidden_size: 128,
+    dl_num_layers: 2,
+    dl_dropout: 0.2,
+    dl_lr: 0.001,
+    dl_batch_size: 4000,
+    dl_n_epochs: 500,
     dl_step_len: 20,
   },
 };
@@ -1847,13 +1865,13 @@ export const buildBackendTrainingPayload = (
         : {}),
     },
     xgb_params: {
-      max_depth: request.params.xgb_max_depth ?? (request.params.max_depth && request.params.max_depth > 0 ? request.params.max_depth : 4),
+      max_depth: request.params.xgb_max_depth ?? (request.params.max_depth && request.params.max_depth > 0 ? request.params.max_depth : 5),
       learning_rate: request.params.xgb_learning_rate ?? request.params.learning_rate,
-      subsample: request.params.xgb_subsample ?? 0.7,
-      colsample_bytree: request.params.xgb_colsample_bytree ?? 0.65,
+      subsample: request.params.xgb_subsample ?? 0.8,
+      colsample_bytree: request.params.xgb_colsample_bytree ?? 0.8,
       reg_alpha: request.params.xgb_reg_alpha ?? 0.5,
-      reg_lambda: request.params.xgb_reg_lambda ?? 2.0,
-      min_child_weight: request.params.xgb_min_child_weight ?? 100,
+      reg_lambda: request.params.xgb_reg_lambda ?? 10.0,
+      min_child_weight: request.params.xgb_min_child_weight ?? 500,
       objective:
         request.params.objective === 'binary'
           ? 'binary:logistic'
@@ -1867,10 +1885,13 @@ export const buildBackendTrainingPayload = (
     catboost_params: {
       depth: request.params.cb_depth ?? request.params.max_depth ?? 6,
       learning_rate: request.params.cb_learning_rate ?? request.params.learning_rate,
-      l2_leaf_reg: request.params.cb_l2_leaf_reg ?? 3.0,
-      random_strength: request.params.cb_random_strength ?? 1.5,
-      bagging_temperature: request.params.cb_bagging_temperature ?? 0.8,
+      l2_leaf_reg: request.params.cb_l2_leaf_reg ?? 10.0,
+      random_strength: request.params.cb_random_strength ?? 2.0,
+      bagging_temperature: request.params.cb_bagging_temperature ?? 1.0,
       od_wait: request.params.cb_od_wait ?? 100,
+      // CatBoost 用 iterations（不是 num_boost_round）；显式下发避免被
+      // 共享的 num_boost_round=1000 覆盖后端 2000 起点。
+      iterations: request.params.cb_iterations ?? 2000,
       loss_function:
         request.params.objective === 'rank_xendcg' || request.params.objective === 'lambdarank'
           ? 'YetiRank'

@@ -22,6 +22,11 @@ from typing import Any
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.shared.feature_guard import (
+    describe_leaks,
+    find_hard_label_leaks,
+)
+
 ALLOWED_MODEL_TYPES = frozenset(
     {
         "lightgbm",
@@ -325,6 +330,10 @@ class TrainingRequest(BaseModel):
             raise HTTPException(
                 status_code=422, detail="features length cannot exceed 600"
             )
+        # 前视泄漏硬闸：label / fwd_ret / future_ret 等列不得作为特征提交。
+        _leaks = find_hard_label_leaks(features)
+        if _leaks:
+            raise HTTPException(status_code=422, detail=describe_leaks(_leaks))
 
         for key, message in (
             ("lgb_params", "lgb_params must be an object"),
