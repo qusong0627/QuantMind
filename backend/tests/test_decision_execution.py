@@ -864,3 +864,31 @@ def test_two_full_size_buys_cannot_exceed_the_agent_quota() -> None:
     assert plan.buys[0].quantity == 19_800
     assert sum(leg.quantity * leg.limit_price for leg in plan.buys) <= 200_000.0
     assert "l3.below_min_lot" in _rule_ids(plan)
+
+
+def test_managed_holding_sell_leg_carries_owner() -> None:
+    """人工托管仓（owner=manual）的卖出腿必须带 owner：订单/幂等键/成交入账落 manual。"""
+    plan = plan_orders(
+        _batch(_sell("600036.SH", 1.0)),
+        holdings={
+            "600036.SH": Holding(
+                symbol="600036.SH", available=1000, name="托管测试", owner="manual"
+            )
+        },
+        quotes=dict([_quote("600036.SH")]),
+    )
+    (leg,) = plan.sells
+    assert leg.owner == "manual"
+    assert leg.as_dict()["owner"] == "manual"
+
+
+def test_own_holding_sell_leg_has_no_owner_override() -> None:
+    """自有仓卖出腿 owner 为空：执行段回落到本轮 agent（legacy/金样行为不变）。"""
+    plan = plan_orders(
+        _batch(_sell("600036.SH", 1.0)),
+        holdings=dict([_held("600036.SH", available=1000)]),
+        quotes=dict([_quote("600036.SH")]),
+    )
+    (leg,) = plan.sells
+    assert leg.owner == ""
+    assert "owner" not in leg.as_dict()

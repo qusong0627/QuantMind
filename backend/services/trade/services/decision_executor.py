@@ -123,6 +123,7 @@ def holdings_from_rows(rows: Iterable[object]) -> dict[str, Holding]:
             # 里是 structural，不吃影子代价账），比让整个轮次炸掉更合适，也仍然可见。
             available=float(avail or 0),
             name=str(_pick(row, ("name",)) or ""),
+            owner=str(_pick(row, ("owner",)) or ""),
         )
     return out
 
@@ -630,8 +631,9 @@ def _make_default_submitter(
     腿在镜像侧豁免昨收偏离闸门（见 ``OrderRouter._submit_direct_real``）。
 
     ``agent`` 由构造时闭合（同 ``tenant_id``：它属于「这一轮是谁在跑」，不是每笔
-    腿各自决定的事），随 ``OrderRequest`` 落台账并跟着镜像进真单——成交回报只能
-    从订单上读归属（P2.7）。
+    腿各自决定的事）——**例外是托管仓卖出**：``leg.owner`` 非空时按 owner 落订单
+    （人工托管仓的成交/盈亏必须记人工单，2026-11-27），随 ``OrderRequest`` 落台账
+    并跟着镜像进真单——成交回报只能从订单上读归属（P2.7）。
     """
     from backend.shared.simulation_account_keys import normalize_runtime_user
 
@@ -660,7 +662,8 @@ def _make_default_submitter(
                 mirror=real,
                 mirror_source=source if real else "",
                 real_limit_price=leg.limit_price if real else None,
-                agent=agent,
+                # 每腿归属：托管仓（leg.owner=manual）落 manual，其余落本轮 agent。
+                agent=str(getattr(leg, "owner", "") or "") or agent,
                 direct_real=bool(real and direct_real),
             ),
         )
@@ -955,8 +958,11 @@ async def execute_batch(
 
     receipts: list[LegReceipt] = []
     for leg in plan.legs:
+        # 托管仓卖出（leg.owner 非空）：订单归属/幂等键必须落 owner（manual），
+        # 否则成交会记进本轮 agent 的账本 → 卖非持仓被拒、人工单盈亏错位。
+        leg_agent = str(getattr(leg, "owner", "") or "") or agent
         key = build_llm_decision_client_order_id(
-            round_id, leg.symbol, leg.side, agent=agent
+            round_id, leg.symbol, leg.side, agent=leg_agent
         )
         if key is None:
             # 幂等键缺参 ⇒ 不下。带占位符重试会让**后续轮**的同标的同方向真单撞上

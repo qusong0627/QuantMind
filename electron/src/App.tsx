@@ -10,7 +10,7 @@ import 'dayjs/locale/zh-cn';
 import { DashboardSkeleton } from './components/common/DashboardSkeleton';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { FloatingNavBar } from './components/navigation/FloatingNavBar';
-import MiningTaskMonitor from './features/alpha-research/components-v2/MiningTaskMonitor';
+import { BackgroundTaskDock } from './features/background-tasks/BackgroundTaskDock';
 import { loadLocalLivePage } from './features/shared/localLive';
 import { resolveSimColumnForcedMode } from './pages/trading/utils/consoleTabs';
 import { TitleBar } from './components/layout/TitleBar';
@@ -873,12 +873,11 @@ export default function App() {
                 />
               )}
 
-              {/* 挖掘任务监视器：必须挂在**壳**上（不是页面上）——
-                  它自己轮询 `GET /alpha-agent/tasks`，所以切页不丢、刷新即重放。
-                  放在路由之外，任何栏目里都能看到后台还在跑什么。
-                  公开路由（登录页）壳也渲染：未登录时不给它开轮询（无 token
-                  的 /tasks 恒 401，纯噪音）。 */}
-              <MiningTaskMonitor enabled={isAuthenticated} />
+              {/* 后台任务坞：训练 / 推理 / 挖掘 / 数据同步 + 服务器负载，一条可拖动悬浮条。
+                  挂在**壳**上而非页面上——切页、刷新都不丢；未登录不轮询（无 token 的
+                  /tasks 恒 401，只会刷控制台噪音）。原 MiningTaskMonitor 已被它取代
+                  （挖掘行内保留取消）。 */}
+              <BackgroundTaskDock enabled={isAuthenticated} />
 
               {/* 菜单触发的导出模态框 */}
               {shouldShowNavigation && ExportModal}

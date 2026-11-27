@@ -1528,6 +1528,13 @@ export default function Live() {
                      （2026-11-27 用户口径：研究总控卡片里的 manual 成交被读成它下的单）。 */
                   <option key="market-research" value="market-research">市场研究（研究总控）</option>
                 )}
+                {market === 'cn' && tab !== 'chat' && (
+                  /* 人工单桶（manual）没有独立决策腿：由 glm 在它的轮次里代管，
+                     所以对话 tab 不出现；持仓/成交/已完成三 tab 仍可单独查看。 */
+                  <option key={MANUAL_AGENT} value={MANUAL_AGENT}>
+                    {displayAgentName(MANUAL_AGENT)}
+                  </option>
+                )}
               </select>
               {(tab === 'completed' || tab === 'trades' || tab === 'positions') && dateOptions.length > 0 && (
                 /* 「日期」筛选：翻历史记录。候选=当前数据源出现过的日期；该数据源没有任何

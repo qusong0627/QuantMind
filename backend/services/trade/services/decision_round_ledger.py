@@ -84,6 +84,10 @@ class AgentLedgerRead:
     #: 额度**不写在账本里**：它是配置，不是账；存进来就有了第二个事实源。
     quota: float | None = None
     errors: tuple[str, ...] = ()
+    #: 额度已用的显式口径：托管仓（``positions`` 里带 ``owner`` 的行）并入视图后，
+    #: 已用额度仍只算**自有仓**成本（人工仓用的是人工现金，不吃本 agent 的额度）。
+    #: ``None`` = 旧行为（positions 全量成本），legacy/单测路径不变。
+    used_override: float | None = None
 
     def mine(self) -> frozenset[str]:
         """本 agent 名下的后缀码集合（``mine_of`` 的口径：**空集就是空集**）。"""
@@ -100,7 +104,13 @@ class AgentLedgerRead:
 
     @property
     def quota_used(self) -> float:
-        """已用额度 = 名下持仓成本合计（与 ``agent_used`` 同口径；卖出即释放）。"""
+        """已用额度 = 名下持仓成本合计（与 ``agent_used`` 同口径；卖出即释放）。
+
+        托管仓（行内带 ``owner``）不计：它用的是人工单桶的现金，占本 agent 额度
+        会让可用额度凭空缩水（2026-11-27）。
+        """
+        if self.used_override is not None:
+            return round(float(self.used_override), 2)
         return positions_cost(self.positions)
 
     @property

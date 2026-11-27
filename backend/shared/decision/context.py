@@ -128,6 +128,10 @@ class HoldingRow:
     #: （渲染 ``—``，绝不写成 0——0 的意思是「今天刚买」）。默认 ``None`` 让
     #: legacy/金样路径不出现该列，提示词逐字节不变。
     held_days: int | None = None
+    #: 归属覆盖：非空 = 这行不是本 agent 的货，而是它**代管**的（如 ``manual``
+    #: 人工单桶，glm 的轮次里可见可卖，成交仍记人工单）。空串 = 自有仓（legacy/
+    #: 金样路径），提示词逐字节不变。
+    owner: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +250,14 @@ class RebalanceContext:
         return self.quota_remaining * self.per_stock_pct
 
 
+#: 人工托管持仓的口径注（只在持仓行带 ``owner`` 时渲染；金样路径不出现）。
+MANAGED_HOLDINGS_NOTE = (
+    "标注「人工托管」的持仓是**账户主人手动买入的**（已授权你决策）：可卖、可减仓、"
+    "可挂守护，但成交与盈亏记在人工单桶（manual），**不计入你的业绩**；"
+    "成本/可卖量口径与你的自有仓一致。"
+)
+
+
 #: 成本列口径说明（逐字移植隔壁 ``live_prompt_context.LEDGER_COST_NOTE``）。
 #: 这段话是 2026-09-12 那次「glm 把浮亏讲成 +83%」事故的补丁，措辞即契约。
 LEDGER_COST_NOTE = (
@@ -357,6 +369,7 @@ def ledger_cost_rows(
                     cost_src=COST_SRC_LEDGER,
                     price_src=r.price_src,
                     held_days=held_days,
+                    owner=r.owner,
                 )
             )
         else:
@@ -373,6 +386,7 @@ def ledger_cost_rows(
                     cost_src=COST_SRC_BRIDGE,
                     price_src=r.price_src,
                     held_days=held_days,
+                    owner=r.owner,
                 )
             )
     return tuple(out)
@@ -423,9 +437,10 @@ def _holding_row_line(h: HoldingRow, *, show_age: bool = False) -> str:
     has_cost = math.isfinite(h.cost) and h.cost > 0
     cost_cell = format(h.cost, "") + mark if has_cost else MISSING
     price_cell = f"{h.price}‡" if h.price_src == PRICE_SRC_BRIDGE else h.price
+    name_cell = f"{h.name}（人工托管）" if h.owner else h.name
     cells = [
         h.code,
-        h.name,
+        name_cell,
         str(h.volume),
         cost_cell,
         str(price_cell),
@@ -710,6 +725,8 @@ def _context_body(ctx: RebalanceContext) -> list[str]:
         lines += [ctx.alert_block, ""]
     lines += [*(_HOLDINGS_HEADER_AGE if show_age else _HOLDINGS_HEADER)]
     lines += [_holding_row_line(h, show_age=show_age) for h in display]
+    if any(h.owner for h in display):
+        lines += ["", MANAGED_HOLDINGS_NOTE]
     # 现价取数口径注：只在接上行情面（price_src 有标注）时出现——legacy/金样路径
     # 逐字节不动（见 :data:`PRICE_SRC_NOTE`）。
     if any(h.price_src for h in display):

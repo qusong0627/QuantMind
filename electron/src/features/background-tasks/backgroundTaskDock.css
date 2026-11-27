@@ -1,0 +1,515 @@
+/* 后台任务坞：可拖动的悬浮条 + 可展开面板
+   视觉取向——深色玻璃胶囊，在浅色与深色页面上都能读；不做主题分支，避免和
+   全局主题耦合。透明度由 --bgdock-alpha 控制（面板里可循环切换 72/86/100%）。 */
+
+.bgdock {
+  position: fixed;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  z-index: 2000; /* 高于底部导航（.bottom-dock z-index:1050）与页面内容层 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  inline-size: max-content;
+  max-inline-size: min(420px, calc(100vw - 24px));
+  color: rgb(236 239 244);
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: var(--bgdock-alpha, 0.86);
+  transition: opacity 160ms ease-out;
+  will-change: transform;
+}
+
+.bgdock:hover,
+.bgdock:focus-within,
+.bgdock--expanded {
+  opacity: 1;
+}
+
+/* ---------- 折叠态悬浮条 ---------- */
+
+.bgdock-bar,
+.bgdock-panel {
+  background: rgb(18 20 24 / 0.82);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 14px;
+  box-shadow:
+    0 10px 30px rgb(0 0 0 / 0.28),
+    inset 0 1px 0 rgb(255 255 255 / 0.06);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  backdrop-filter: blur(18px) saturate(1.25);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .bgdock-bar,
+  .bgdock-panel {
+    background: rgb(24 26 31 / 0.97);
+  }
+}
+
+.bgdock-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 8px;
+}
+
+.bgdock-grip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: grab;
+  touch-action: none;
+}
+
+.bgdock-grip:active {
+  cursor: grabbing;
+}
+
+.bgdock-grip:focus-visible {
+  outline: 2px solid rgb(120 190 255);
+  outline-offset: 2px;
+}
+
+.bgdock-grip__label {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.bgdock-pulse {
+  inline-size: 8px;
+  block-size: 8px;
+  border-radius: 50%;
+  background: rgb(150 156 168);
+}
+
+.bgdock-pulse--on {
+  background: rgb(86 214 160);
+  box-shadow: 0 0 0 0 rgb(86 214 160 / 0.55);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bgdock-pulse--on {
+    animation: bgdock-breathe 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes bgdock-breathe {
+  to {
+    box-shadow: 0 0 0 6px rgb(86 214 160 / 0);
+  }
+}
+
+/* ---------- 类型小标 ---------- */
+
+.bgdock-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 18px;
+  block-size: 18px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid rgb(255 255 255 / 0.12);
+}
+
+.bgdock-chip--training {
+  color: rgb(140 196 255);
+}
+.bgdock-chip--inference {
+  color: rgb(196 168 255);
+}
+.bgdock-chip--mining {
+  color: rgb(255 196 120);
+}
+.bgdock-chip--sync {
+  color: rgb(130 222 190);
+}
+
+/* ---------- 负载 ---------- */
+
+.bgdock-load {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+
+.bgdock-meter {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 2px 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bgdock-meter__label {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: rgb(255 255 255 / 0.45);
+}
+
+.bgdock-meter__value {
+  font-size: 11px;
+  color: rgb(255 255 255 / 0.86);
+}
+
+.bgdock-meter__track {
+  grid-column: 1 / -1;
+  display: block;
+  block-size: 2px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 0.12);
+  overflow: clip;
+}
+
+.bgdock-meter__fill {
+  display: block;
+  block-size: 100%;
+  border-radius: inherit;
+  background: rgb(120 190 255);
+  transition: inline-size 400ms ease-out;
+}
+
+.bgdock-meter--warm .bgdock-meter__fill {
+  background: rgb(255 196 120);
+}
+.bgdock-meter--hot .bgdock-meter__fill {
+  background: rgb(255 122 110);
+}
+
+/* ---------- 展开面板 ---------- */
+
+.bgdock-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  inline-size: min(388px, calc(100vw - 24px));
+}
+
+.bgdock-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bgdock-panel__title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.bgdock-panel__count {
+  color: rgb(255 255 255 / 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
+.bgdock-icon {
+  margin-inline-start: auto;
+  inline-size: 22px;
+  block-size: 22px;
+  border-radius: 7px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  background: rgb(255 255 255 / 0.06);
+  color: rgb(255 255 255 / 0.75);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bgdock-icon + .bgdock-icon {
+  margin-inline-start: 0;
+}
+
+/* 悬浮条右端的关闭：只关掉整条坞（面板内的 × 是收面板） */
+.bgdock-bar__close {
+  flex: none;
+  inline-size: 20px;
+  block-size: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  background: rgb(255 255 255 / 0.06);
+  color: rgb(255 255 255 / 0.6);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.bgdock-bar__close:hover {
+  background: rgb(255 255 255 / 0.16);
+  color: rgb(255 255 255 / 0.95);
+}
+
+.bgdock-bar__close:focus-visible {
+  outline: 2px solid rgb(120 190 255);
+  outline-offset: 1px;
+}
+
+.bgdock-icon:hover {
+  background: rgb(255 255 255 / 0.14);
+  color: rgb(255 255 255 0.95);
+}
+
+.bgdock-icon:focus-visible {
+  outline: 2px solid rgb(120 190 255);
+  outline-offset: 1px;
+}
+
+.bgdock-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-block-size: min(46vh, 380px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.bgdock-empty {
+  margin: 4px 2px;
+  color: rgb(255 255 255 / 0.5);
+}
+
+.bgdock-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: rgb(255 255 255 / 0.04);
+}
+
+.bgdock-row:hover {
+  background: rgb(255 255 255 / 0.09);
+  border-color: rgb(255 255 255 / 0.12);
+}
+
+.bgdock-row__main {
+  display: flex;
+  flex: 1;
+  min-inline-size: 0;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.bgdock-row__main:focus-visible {
+  outline: 2px solid rgb(120 190 255);
+  outline-offset: -2px;
+}
+
+.bgdock-row__cancel {
+  flex: none;
+  inline-size: 26px;
+  border: 0;
+  border-inline-start: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 0 10px 10px 0;
+  background: transparent;
+  color: rgb(255 255 255 / 0.5);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bgdock-row__cancel:hover {
+  background: rgb(255 122 110 / 0.18);
+  color: rgb(255 190 185);
+}
+
+.bgdock-row__cancel:focus-visible {
+  outline: 2px solid rgb(120 190 255);
+  outline-offset: -2px;
+}
+
+.bgdock-row__dot {
+  inline-size: 6px;
+  block-size: 6px;
+  margin-block-start: 5px;
+  border-radius: 50%;
+  background: rgb(150 156 168);
+  flex: none;
+}
+
+.bgdock-row__dot--running {
+  background: rgb(86 214 160);
+}
+.bgdock-row__dot--queued {
+  background: rgb(255 196 120);
+}
+.bgdock-row__dot--failed {
+  background: rgb(255 122 110);
+}
+
+.bgdock-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-inline-size: 0;
+  flex: 1;
+}
+
+.bgdock-row__head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-inline-size: 0;
+}
+
+.bgdock-row__kind {
+  flex: none;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.09);
+  color: rgb(255 255 255 / 0.72);
+}
+
+.bgdock-row__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bgdock-row__meta {
+  color: rgb(255 255 255 / 0.5);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 原生 <progress> 定制 ---------- */
+
+.bgdock-row__bar {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  inline-size: 100%;
+  block-size: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 0.12);
+}
+
+.bgdock-row__bar::-webkit-progress-bar {
+  background: transparent;
+}
+
+.bgdock-row__bar::-webkit-progress-value {
+  background: rgb(120 190 255);
+  border-radius: 2px;
+  transition: inline-size 0.3s;
+}
+
+.bgdock-row__bar::-moz-progress-bar {
+  background: rgb(120 190 255);
+  border-radius: 2px;
+  transition: inline-size 0.3s;
+}
+
+/* 不确定进度：短段滑动；reduced motion 只放慢，不消失 */
+.bgdock-row__bar:not([value]) {
+  --bgdock-indeterminate-size: 34%;
+  --bgdock-indeterminate-duration: 1.5s;
+  container-type: inline-size;
+}
+
+.bgdock-row__bar:indeterminate::-webkit-progress-value {
+  animation: bgdock-indeterminate var(--bgdock-indeterminate-duration) infinite linear;
+}
+
+.bgdock-row__bar:indeterminate::-moz-progress-bar {
+  animation: bgdock-indeterminate var(--bgdock-indeterminate-duration) infinite linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bgdock-row__bar:not([value]) {
+    --bgdock-indeterminate-duration: 10s;
+  }
+}
+
+@keyframes bgdock-indeterminate {
+  from,
+  to {
+    inline-size: var(--bgdock-indeterminate-size);
+    margin-right: auto;
+  }
+  from {
+    translate: -100%;
+  }
+  to {
+    translate: 100cqi;
+  }
+}
+
+/* ---------- 展开方向与入场 ---------- */
+
+/* 默认（悬浮条在下半屏）：面板压在条上方 */
+.bgdock-panel {
+  order: 0;
+}
+
+.bgdock-bar {
+  order: 1;
+}
+
+/* 悬浮条在上半屏时改为向下展开，避免面板顶出屏幕 */
+.bgdock--down .bgdock-panel {
+  order: 2;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .bgdock-panel {
+    transition:
+      opacity 180ms ease-out,
+      translate 180ms ease-out;
+  }
+}
+
+@starting-style {
+  .bgdock-panel {
+    opacity: 0;
+    translate: 0 6px;
+  }
+}
+
+@starting-style {
+  .bgdock--down .bgdock-panel {
+    translate: 0 -6px;
+  }
+}
+
+/* 极窄屏：面板铺满可用宽度，避免溢出 */
+@media (max-width: 420px) {
+  .bgdock-panel {
+    inline-size: calc(100vw - 24px);
+  }
+}
+
+/* 完成播报对视觉用户隐藏，只留给读屏 */
+.bgdock-live {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

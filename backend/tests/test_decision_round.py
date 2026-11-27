@@ -4886,3 +4886,51 @@ def test_clip_empty_ledger_hides_everything() -> None:
     """账本为空 ≠ 看到全账户：宁可不给模型看，也不能把别人的仓算成本 agent 的。"""
     rows = (_holding_row("600036.SH", 1200, 1200),)
     assert clip_holdings_to_ledger(rows, {}) == ((), 1)
+
+
+def test_clip_carries_owner_for_managed_holdings() -> None:
+    """人工托管仓（owner=manual）在 glm 视图里可见，owner 必须随行带到执行段。"""
+    rows = (_holding_row("600036.SH", 1200, 1200),)
+    visible, hidden = clip_holdings_to_ledger(
+        rows, {"600036.SH": {"volume": 800, "cost_price": 9.0, "owner": "manual"}}
+    )
+    assert hidden == 0
+    (row,) = visible
+    assert row.owner == "manual"
+    assert row.avail == 800
+    # 执行段持仓同样带 owner（卖腿据此落 manual 归属）
+    from backend.services.trade.services.decision_executor import holdings_from_rows
+
+    holding = holdings_from_rows(visible)["600036.SH"]
+    assert holding.owner == "manual"
+
+
+def test_prompt_marks_managed_holdings_and_keeps_owner() -> None:
+    """提示词标「人工托管」＋口径注；账本成本改写不能把 owner 弄丢。"""
+    from backend.shared.decision import context as ctx
+
+    row = clip_holdings_to_ledger(
+        (_holding_row("600036.SH", 1200, 1200),),
+        {"600036.SH": {"volume": 800, "cost_price": 9.0, "owner": "manual"}},
+    )[0][0]
+    assert "（人工托管）" in ctx._holding_row_line(row)
+    shown = ctx.ledger_cost_rows(
+        (row,), {"600036.SH": {"cost_price": 9.0, "volume": 800}}
+    )
+    assert shown[0].owner == "manual"
+
+
+def test_manual_manager_defaults_to_glm_and_can_be_disabled(monkeypatch, tmp_path):
+    """manual 桶默认由 glm 代管；空串关闭；别人只认自己的。"""
+    monkeypatch.setenv("QM_RUNTIME_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.delenv("QM_DECISION_MANUAL_MANAGER", raising=False)
+    assert IO._manages_manual("glm-5.3-flash") is True
+    assert IO._manages_manual("deepseek-v4-pro") is False
+    assert IO._manages_manual("manual") is False
+
+    monkeypatch.setenv("QM_DECISION_MANUAL_MANAGER", "")
+    assert IO._manages_manual("glm-5.3-flash") is False
+
+    monkeypatch.setenv("QM_DECISION_MANUAL_MANAGER", "deepseek-v4-pro")
+    assert IO._manages_manual("deepseek-v4-pro") is True
+    assert IO._manages_manual("glm-5.3-flash") is False

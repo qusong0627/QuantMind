@@ -12,7 +12,8 @@ export const MANUAL_AGENT = 'manual';
 
 const DISPLAY_NAMES: Record<string, string> = {
   'market-research': '市场研究',
-  [MANUAL_AGENT]: '人工单（账户主）',
+  // manual 不是模型，但 2026-11-27 起由 glm 兼管决策（身份仍是 manual，盈亏单列）
+  [MANUAL_AGENT]: '人工单（托管）',
 };
 
 export function displayAgentName(name: string | null | undefined): string {

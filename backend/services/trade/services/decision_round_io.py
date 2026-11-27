@@ -175,37 +175,96 @@ async def load_agent_ledger(
 
     归一：``agent`` 空串直接报错不查库（空 agent 会命中一切 ``agent = ''`` 的行，
     那是别家厂商的历史垃圾行，不是「没有这个模型」）。
+
+    **人工单托管（2026-11-27 用户口径）**：``QM_DECISION_MANUAL_MANAGER``（默认
+    glm）那家的视图额外并入 ``manual`` 桶的持仓，逐行标 ``owner='manual'``；
+    其余 agent 只认自己的。托管仓不吃本 agent 额度（``used_override`` 只算自有仓），
+    卖出时执行段按 ``owner`` 落订单归属 → 成交/盈亏仍记人工单。
     """
     from backend.shared.agent_ledger_store import load_ledger as _load_ledger
     from backend.shared.database_manager_v2 import get_session
+
+    from backend.services.trade.services.decision_round_ledger import positions_cost
 
     name = str(agent or "").strip()
     if not name:
         return AgentLedgerRead(errors=("agent 名为空：无法定位分账账本段",))
     agent_policy = load_trading_policy().for_agent(name)
+    include_manual = _manages_manual(name)
+    wanted = [name] + (["manual"] if include_manual else [])
     try:
         async with get_session(read_only=True) as session:
             doc = await _load_ledger(
-                session, tenant_id=tenant_id, user_id=user_id, agents=[name]
+                session, tenant_id=tenant_id, user_id=user_id, agents=wanted
             )
     except Exception as exc:  # noqa: BLE001 读不到 = 账本不可信（调用点 abort）
         return AgentLedgerRead(
             errors=(f"分账账本读取失败：{type(exc).__name__}: {exc}",),
         )
-    rec = (doc.get("agents") or {}).get(name)
-    if not isinstance(rec, Mapping):
-        return AgentLedgerRead(ok=True, known=False, quota=agent_policy.quota)
-    cash = as_float(rec.get("virtual_cash"))
-    positions = rec.get("positions")
-    return AgentLedgerRead(
-        ok=True,
-        known=True,
-        positions=dict(positions) if isinstance(positions, Mapping) else {},
-        # 现金为负**原样带回**（不夹到 0）：透支是真实状态，夹掉只会让「为什么一直
-        # 不买」变成一个查不出的问题。负值在下游自然是「什么都买不起」。
-        virtual_cash=agent_policy.quota if cash is None else float(cash),
-        quota=agent_policy.quota,
+    agents_doc = doc.get("agents") or {}
+    rec = agents_doc.get(name)
+    own_positions = (
+        dict(rec.get("positions"))
+        if isinstance(rec, Mapping) and isinstance(rec.get("positions"), Mapping)
+        else {}
     )
+    merged: dict[str, Any] = dict(own_positions)
+    manual_rec = agents_doc.get("manual") if include_manual else None
+    if isinstance(manual_rec, Mapping) and isinstance(manual_rec.get("positions"), Mapping):
+        for code, pos in manual_rec["positions"].items():
+            if code in merged:
+                # 同票两边都有：不合并（合并后卖出的归属会含糊）。人工量留给人工
+                # 自己的视图；本 agent 只卖自有份额，宁可少卖不可错记。
+                logger.warning(
+                    "[DecisionRound] 人工托管仓 %s 与 %s 自有仓同代码，跳过托管并入",
+                    code,
+                    name,
+                )
+                continue
+            item = dict(pos) if isinstance(pos, Mapping) else {}
+            item["owner"] = "manual"
+            merged[str(code)] = item
+    if isinstance(rec, Mapping):
+        cash = as_float(rec.get("virtual_cash"))
+        return AgentLedgerRead(
+            ok=True,
+            known=True,
+            positions=merged,
+            # 现金与额度都只认自有账：人工仓的现金不能给本 agent 花。
+            virtual_cash=agent_policy.quota if cash is None else float(cash),
+            quota=agent_policy.quota,
+            used_override=positions_cost(own_positions),
+        )
+    if merged:
+        # 本 agent 没有自有账（从未成交），但托管的 manual 仓可见：现钱按额度起算。
+        return AgentLedgerRead(
+            ok=True,
+            known=True,
+            positions=merged,
+            virtual_cash=agent_policy.quota,
+            quota=agent_policy.quota,
+            used_override=0.0,
+        )
+    return AgentLedgerRead(ok=True, known=False, quota=agent_policy.quota)
+
+
+#: 人工单桶的托管 agent（2026-11-27 用户口径：glm 认人工单 + 自己的；别人只认自己的）。
+#: 空串 = 不托管（manual 仓不进入任何决策轮）。
+ENV_MANUAL_MANAGER = "QM_DECISION_MANUAL_MANAGER"
+DEFAULT_MANUAL_MANAGER = "glm-5.3-flash"
+
+
+def _manages_manual(agent: str) -> bool:
+    """本 agent 是否兼任人工单桶的决策（默认 glm）。"""
+    from backend.shared.decision_llm_client import effective_env
+    from backend.shared.order_contract import normalize_agent
+
+    raw = str(
+        effective_env().get(ENV_MANUAL_MANAGER, DEFAULT_MANUAL_MANAGER) or ""
+    ).strip()
+    if not raw:
+        return False
+    return normalize_agent(agent) == normalize_agent(raw)
 
 
 def load_intraday_regime() -> dict[str, Any] | None:
@@ -323,6 +382,10 @@ def default_roster() -> tuple[AgentRun, ...]:
     ``LLMNotConfigured`` **不接住**：名册写错一项时，编排层要按「一家都跑不动」如实
     记录每一槽的失败原因（那层合成一个抛错的家）；在这里吞掉只剩单家三家变一家，
     正是迁移计划里「迁完只剩一个模型」那条警告的形态。名册串**文件优先**（见实现）。
+
+    人工单桶（``manual``）不单独成腿：它的持仓由 :func:`load_agent_ledger` 在
+    **托管家**（``QM_DECISION_MANUAL_MANAGER``，默认 glm）的账本视图里并入，
+    见该函数（2026-11-27 用户口径：glm 认人工单 + 自己的，别人只认自己的）。
     """
     from backend.shared.decision_llm_client import (
         ENV_ROSTER,
@@ -750,6 +813,33 @@ def maybe_write_watch(
 
     held = None if ledger is None else held_symbols_from_ledger(ledger)
     watch_plan = plan_watch(decisions, agent=agent, held_symbols=held)
+    # 人工托管仓（2026-11-27）：watch 规则落库是**卖出规则**，owner 只能是持仓
+    # 归属方（manual）。v1 不把 glm 的 watch 改写成 manual 规则（写侧整组替换会
+    # 与 auto 规则打架）；托管仓保留 auto SLTP 覆盖，模型要减仓请直接给 sell。
+    if ledger is not None and isinstance(getattr(ledger, "positions", None), Mapping):
+        owners = {
+            str(code): str((pos or {}).get("owner") or "")
+            if isinstance(pos, Mapping)
+            else ""
+            for code, pos in ledger.positions.items()
+        }
+        managed = [
+            w for w in watch_plan.rules if owners.get(str(w.symbol or "")) == "manual"
+        ]
+        if managed:
+            from dataclasses import replace as _replace
+
+            watch_plan = _replace(
+                watch_plan,
+                rules=tuple(
+                    w for w in watch_plan.rules
+                    if owners.get(str(w.symbol or "")) != "manual"
+                ),
+            )
+            notes.append(
+                f"{len(managed)} 条 watch 命中人工托管仓：不挂 glm 规则"
+                "（人工仓由 auto 止损覆盖；要减仓请直接给 sell，成交仍记人工单）"
+            )
     entry_prices = entry_prices_from_ledger(ledger)
     not_held = sum(1 for r in watch_plan.rejected if r.reason == REJECT_NOT_HELD)
     if not_held:

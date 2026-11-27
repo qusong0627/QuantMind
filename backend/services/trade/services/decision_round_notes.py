@@ -108,7 +108,10 @@ def round_highlights(decisions: Sequence[Any], outcome: Any) -> list[str]:
             sizing = f" {qty}股" if qty else ""
             if px:
                 sizing += f" @¥{px}"
-            money.append(f"{word} {label}{sizing}{_highlight_extra(rec, veto, leg, d)}")
+            managed = "〔人工托管〕" if str(getattr(leg, "owner", "") or "") else ""
+            money.append(
+                f"{word} {label}{sizing}{_highlight_extra(rec, veto, leg, d)}{managed}"
+            )
         lines = money + guards
         if len(lines) > _HIGHLIGHT_LIMIT:
             rolled = len(lines) - _HIGHLIGHT_LIMIT

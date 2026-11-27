@@ -137,6 +137,9 @@ class Holding:
     #: 可卖数量（T+1 之后、扣掉已被挂单占用的部分）。
     available: float = 0.0
     name: str = ""
+    #: 归属覆盖：非空 = 本 agent **代管**的仓位（如 ``manual`` 人工单桶，glm 的
+    #: 轮次里可见可卖，但订单/成交/盈亏归 owner）。空串 = 自有仓。
+    owner: str = ""
 
 
 @dataclass(frozen=True)
@@ -168,13 +171,16 @@ class Leg:
     limit_price: float | None
     reason: str
     note: str = ""
+    #: 归属覆盖：非空 = 本腿是**代管仓**的卖出（订单 agent / 幂等键 / 成交入账
+    #: 都用它）。空串 = 本轮 agent 自有腿。
+    owner: str = ""
 
     @property
     def is_buy(self) -> bool:
         return self.side == BUY
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "symbol": self.symbol,
             "side": self.side,
             "quantity": self.quantity,
@@ -182,6 +188,9 @@ class Leg:
             "reason": self.reason,
             "note": self.note,
         }
+        if self.owner:
+            out["owner"] = self.owner
+        return out
 
 
 @dataclass(frozen=True)
@@ -516,6 +525,7 @@ class _Plan:
                 limit_price=limit,
                 reason=d.reason,
                 note=note,
+                owner=holding.owner,
             )
         )
         self.placed.add((symbol, side))

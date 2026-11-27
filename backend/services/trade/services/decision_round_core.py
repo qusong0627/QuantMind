@@ -589,7 +589,16 @@ def clip_holdings_to_ledger(
         if owned is None or owned <= 0:
             continue
         bridge_avail = as_float(getattr(row, "avail", None)) or 0.0
-        visible.append(replace(row, avail=int(max(0.0, min(bridge_avail, owned)))))
+        # 归属覆盖（2026-11-27）：托管仓（如 manual）在托管家轮次里可见可卖，
+        # owner 随行带到执行段 → 订单/幂等键/成交入账都落 owner，盈亏不进本 agent。
+        owner = str(pos.get("owner") or "").strip()
+        visible.append(
+            replace(
+                row,
+                avail=int(max(0.0, min(bridge_avail, owned))),
+                owner=owner,
+            )
+        )
     return tuple(visible), len(rows) - len(visible)
 
 
