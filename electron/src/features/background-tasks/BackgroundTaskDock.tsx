@@ -30,9 +30,10 @@ function readPos(): DockPos | null {
 }
 
 function defaultPos(estimatedWidth: number, estimatedHeight: number): DockPos {
+  // 默认落在右下角，但要抬到底部导航（约 64px）之上，别压住「后台管理」那条栏
   return {
     x: Math.max(MARGIN, window.innerWidth - estimatedWidth - 24),
-    y: Math.max(MARGIN, window.innerHeight - estimatedHeight - 88),
+    y: Math.max(MARGIN, window.innerHeight - estimatedHeight - 108),
   };
 }
 
@@ -54,41 +55,70 @@ function formatElapsed(startedAt?: string | null): string | null {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
 }
 
+function Meter({
+  label,
+  value,
+  text,
+  title,
+}: {
+  label: string;
+  value: number | null;
+  text: string;
+  title: string;
+}) {
+  // 状态语义：绿=正常、黄=警告、红=严重（与 A 股涨跌红绿是两套，别混用）
+  const tone = value == null ? 'idle' : value >= 85 ? 'hot' : value >= 60 ? 'warm' : 'cool';
+  return (
+    <span className={`bgdock-meter bgdock-meter--${tone}`} title={title}>
+      <span className="bgdock-meter__label">{label}</span>
+      <span className="bgdock-meter__value">{text}</span>
+      <span className="bgdock-meter__track" aria-hidden="true">
+        <span className="bgdock-meter__fill" style={{ inlineSize: `${value ?? 0}%` }} />
+      </span>
+    </span>
+  );
+}
+
 function LoadMeter({ load }: { load: ServerLoad | null }) {
   if (!load) return null;
-  const cpu = load.cpu_pct;
   const memPct =
     load.mem_used_gb != null && load.mem_total_gb
       ? (load.mem_used_gb / load.mem_total_gb) * 100
       : null;
-  const tone = (v: number | null) => (v == null ? 'idle' : v >= 85 ? 'hot' : v >= 60 ? 'warm' : 'cool');
   return (
     <div className="bgdock-load" aria-label="服务器负载">
-      <span className={`bgdock-meter bgdock-meter--${tone(cpu)}`} title="CPU 使用率">
-        <span className="bgdock-meter__label">CPU</span>
-        <span className="bgdock-meter__value">{cpu == null ? '—' : `${Math.round(cpu)}%`}</span>
-        <span className="bgdock-meter__track" aria-hidden="true">
-          <span className="bgdock-meter__fill" style={{ inlineSize: `${cpu ?? 0}%` }} />
-        </span>
-      </span>
-      <span className={`bgdock-meter bgdock-meter--${tone(memPct)}`} title="内存占用">
-        <span className="bgdock-meter__label">MEM</span>
-        <span className="bgdock-meter__value">
-          {load.mem_used_gb == null ? '—' : `${load.mem_used_gb.toFixed(0)}G`}
-        </span>
-        <span className="bgdock-meter__track" aria-hidden="true">
-          <span className="bgdock-meter__fill" style={{ inlineSize: `${memPct ?? 0}%` }} />
-        </span>
-      </span>
-      {load.gpu && (
-        <span className={`bgdock-meter bgdock-meter--${tone(load.gpu.util_pct)}`} title={load.gpu.name}>
-          <span className="bgdock-meter__label">GPU</span>
-          <span className="bgdock-meter__value">{Math.round(load.gpu.util_pct)}%</span>
-          <span className="bgdock-meter__track" aria-hidden="true">
-            <span className="bgdock-meter__fill" style={{ inlineSize: `${load.gpu.util_pct}%` }} />
-          </span>
-        </span>
-      )}
+      <Meter
+        label="CPU"
+        value={load.cpu_pct}
+        text={load.cpu_pct == null ? '—' : `${Math.round(load.cpu_pct)}%`}
+        title="CPU 使用率（3 秒刷新）"
+      />
+      <Meter
+        label="内存"
+        value={memPct}
+        text={
+          load.mem_used_gb == null
+            ? '—'
+            : `${load.mem_used_gb.toFixed(0)}/${load.mem_total_gb?.toFixed(0) ?? '—'}G`
+        }
+        title="内存占用（3 秒刷新）"
+      />
+      <Meter
+        label="磁盘"
+        value={load.disk_used_pct}
+        text={load.disk_used_pct == null ? '—' : `${Math.round(load.disk_used_pct)}%`}
+        title="根分区占用（3 秒刷新）"
+      />
+      <Meter
+        label="GPU"
+        value={load.gpu?.util_pct ?? null}
+        text={load.gpu ? `${Math.round(load.gpu.util_pct)}%` : '—'}
+        title={
+          load.gpu
+            ? `${load.gpu.name}${load.gpu.temp_c != null ? ` · ${Math.round(load.gpu.temp_c)}°C` : ''} · 显存 ${Math.round(load.gpu.mem_used_mb)}/${Math.round(load.gpu.mem_total_mb)}MB · 1 分钟粒度`
+            : '未检测到 GPU（容器内无 nvidia-smi，靠宿主机探针）'
+        }
+      />
     </div>
   );
 }
@@ -172,6 +202,8 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
   // 任务从服务端消失后清掉对应 id，下次同名任务仍会出现。
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const dockRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelH, setPanelH] = useState(0);
   const dragState = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
 
   const visibleTasks = useMemo(
@@ -202,6 +234,20 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
   useEffect(() => {
     localStorage.setItem(OPACITY_KEY, String(opacityIndex));
   }, [opacityIndex]);
+
+  useEffect(() => {
+    if (!expanded) {
+      setPanelH(0);
+      return;
+    }
+    const el = panelRef.current;
+    if (!el) return;
+    const measure = () => setPanelH(el.getBoundingClientRect().height);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [expanded]);
 
   // 首次挂载与窗口尺寸变化时把悬浮条夹回视口内
   useEffect(() => {
@@ -287,8 +333,14 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
   }, []);
 
   const opensUpward = pos ? pos.y > window.innerHeight * 0.42 : true;
+  // 面板在 DOM 里排在悬浮条之前，展开时容器高度变大、左上角锚定会让**整条往下跳**。
+  // 这里把容器整体上移「面板高度」，让悬浮条在屏幕上原地不动，面板向上弹。
+  const yShift =
+    expanded && opensUpward ? Math.min(panelH + 6, Math.max(0, (pos?.y ?? 0) - MARGIN)) : 0;
   const style = {
-    transform: pos ? `translate3d(${pos.x}px, ${pos.y}px, 0)` : undefined,
+    transform: pos
+      ? `translate3d(${pos.x}px, ${Math.max(MARGIN, pos.y - yShift)}px, 0)`
+      : undefined,
     '--bgdock-alpha': String(OPACITY_STEPS[opacityIndex]),
   } as React.CSSProperties;
 
@@ -304,7 +356,7 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
       aria-label="后台任务坞"
     >
       {expanded && (
-        <div className="bgdock-panel" id="bgdock-panel">
+        <div className="bgdock-panel" id="bgdock-panel" ref={panelRef}>
           <div className="bgdock-panel__head">
             <span className="bgdock-panel__title">后台任务</span>
             <span className="bgdock-panel__count">{running ? `${running} 个进行中` : '空闲'}</span>
@@ -336,6 +388,7 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
               ×
             </button>
           </div>
+          <LoadMeter load={load} />
           <div className="bgdock-panel__body">
             {running === 0 ? (
               <p className="bgdock-empty">当前没有后台任务</p>
@@ -351,7 +404,6 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
               ))
             )}
           </div>
-          <LoadMeter load={load} />
         </div>
       )}
 
@@ -376,7 +428,6 @@ export const BackgroundTaskDock: React.FC<{ enabled?: boolean }> = ({ enabled = 
             </span>
           ))}
         </button>
-        <LoadMeter load={load} />
         <button
           type="button"
           className="bgdock-bar__close"

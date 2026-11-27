@@ -27,7 +27,8 @@ function keepActive(tasks: BackgroundTask[]): BackgroundTask[] {
 
 async function fetchTraining(): Promise<BackgroundTask[]> {
   try {
-    const { data } = await apiClient.get<any>('/api/v1/models/training-runs/active');
+    // apiClient.get 已经返回 response.data（不是 AxiosResponse），别再解构一次
+    const data = await apiClient.get<any>('/api/v1/models/training-runs/active');
     if (!data) return [];
     const status = normalizeStatus(data.status);
     if (status === 'done' || status === 'failed') return [];
@@ -52,7 +53,7 @@ async function fetchTraining(): Promise<BackgroundTask[]> {
 
 async function fetchInference(): Promise<BackgroundTask[]> {
   try {
-    const { data } = await apiClient.get<any>('/api/v1/models/inference/backfill-jobs');
+    const data = await apiClient.get<any>('/api/v1/models/inference/backfill-jobs');
     const rows: any[] = Array.isArray(data)
       ? data
       : data?.items ?? data?.jobs ?? data?.data ?? [];
@@ -89,7 +90,7 @@ async function fetchInference(): Promise<BackgroundTask[]> {
 
 async function fetchMining(): Promise<BackgroundTask[]> {
   try {
-    const { data } = await apiClient.get<any>('/api/v1/alpha-agent/tasks');
+    const data = await apiClient.get<any>('/api/v1/alpha-agent/tasks');
     const rows: any[] = Array.isArray(data) ? data : data?.data?.tasks ?? data?.tasks ?? [];
     return keepActive(
       rows.map((row) => {
@@ -120,7 +121,7 @@ async function fetchMining(): Promise<BackgroundTask[]> {
 
 async function fetchSync(): Promise<BackgroundTask[]> {
   try {
-    const { data } = await apiClient.get<any>('/api/v1/admin/data-platform/sync-progress');
+    const data = await apiClient.get<any>('/api/v1/admin/data-platform/sync-progress');
     const p = data?.data ?? data;
     if (!p || String(p.step ?? 'idle') === 'idle') return [];
     const pct = clampPct(p.pct);
@@ -154,7 +155,7 @@ export async function fetchBackgroundTasks(): Promise<BackgroundTask[]> {
 
 export async function fetchServerLoad(): Promise<ServerLoad | null> {
   try {
-    const { data } = await apiClient.get<any>('/api/v1/system/load');
+    const data = await apiClient.get<any>('/api/v1/system/load');
     return {
       cpu_pct: data?.cpu_pct ?? null,
       mem_used_gb: data?.mem_used_gb ?? null,
@@ -167,6 +168,7 @@ export async function fetchServerLoad(): Promise<ServerLoad | null> {
             util_pct: Number(data.gpu.util_pct ?? 0),
             mem_used_mb: Number(data.gpu.mem_used_mb ?? 0),
             mem_total_mb: Number(data.gpu.mem_total_mb ?? 0),
+            temp_c: data.gpu.temp_c == null ? null : Number(data.gpu.temp_c),
           }
         : null,
     };

@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +39,9 @@ ROOT = Path(__file__).resolve().parent.parent
 HB_FILE = ROOT / "logs" / "host_heartbeat.json"
 GAP_LOG = ROOT / "logs" / "host_gaps.jsonl"
 WF_FILE = ROOT / "logs" / "host_heartbeat.writefail.json"
+#: GPU 探针：容器内没有 nvidia-smi / 没有 /dev/nvidia*，由宿主机每分钟写一份，
+#: API 的 /api/v1/system/load 读它补 GPU（data/ 在容器里就是 /data）。
+PROBE_FILE = ROOT / "data" / "system" / "host_probe.json"
 WF_SIZE = 256            # 留痕模板定长（字节）；同长覆写不申请新块
 BJ = timezone(timedelta(hours=8))
 TRADING_GAP_MIN = 3      # 交易日白天阈值
@@ -277,6 +281,47 @@ def memory_pressure_alert(now: datetime, *, dry_run: bool) -> str | None:
     return body
 
 
+def write_host_probe(now: datetime) -> None:
+    """把宿主机 GPU 指标写给容器（容器里没有 nvidia-smi / 没有 GPU 设备）。
+
+    只写 GPU：CPU / 内存 / 磁盘由容器内 psutil 直接读宿主机 /proc，已经是全机口径。
+    cron 每分钟一次 → GPU 指标 1 分钟粒度；失败静默，绝不影响看门狗本身。
+    """
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return
+        idx, name, util, used, total, temp = [
+            p.strip() for p in out.stdout.strip().splitlines()[0].split(",")
+        ]
+        payload = {
+            "ts": now.isoformat(),
+            "gpu": {
+                "index": int(idx),
+                "name": name,
+                "util_pct": float(util),
+                "mem_used_mb": float(used),
+                "mem_total_mb": float(total),
+                "temp_c": float(temp),
+            },
+        }
+        PROBE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PROBE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(PROBE_FILE)
+    except Exception:  # noqa: BLE001  探针失败不打扰看门狗
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="主机存活看门狗")
     ap.add_argument("--boot", action="store_true", help="开机模式（@reboot 调用）")
@@ -331,6 +376,7 @@ def main() -> int:
                 print(f"⚠️ 心跳写入失败（已留痕，下分钟重试）: {exc}",
                       file=sys.stderr)
                 write_fail_marker(exc, now)
+            write_host_probe(now)
         # 内存告急放在心跳之后：内存压力不该拖累「主机还活着」这条最基础的证据
         mem_msg = memory_pressure_alert(now, dry_run=args.dry_run)
         if mem_msg:

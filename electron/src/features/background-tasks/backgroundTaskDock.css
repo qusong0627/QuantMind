@@ -1,6 +1,6 @@
 /* 后台任务坞：可拖动的悬浮条 + 可展开面板
-   视觉取向——深色玻璃胶囊，在浅色与深色页面上都能读；不做主题分支，避免和
-   全局主题耦合。透明度由 --bgdock-alpha 控制（面板里可循环切换 72/86/100%）。 */
+   视觉取向——**浅色玻璃卡片**，与站内 slate/white + indigo 的既有外观一致；
+   透明度由 --bgdock-alpha 控制（面板里可循环切换 72/86/100%）。 */
 
 .bgdock {
   position: fixed;
@@ -11,8 +11,8 @@
   flex-direction: column;
   gap: 6px;
   inline-size: max-content;
-  max-inline-size: min(420px, calc(100vw - 24px));
-  color: rgb(236 239 244);
+  max-inline-size: min(340px, calc(100vw - 24px));
+  color: rgb(15 23 42);
   font-size: 12px;
   line-height: 1.35;
   opacity: var(--bgdock-alpha, 0.86);
@@ -20,30 +20,30 @@
   will-change: transform;
 }
 
-.bgdock:hover,
-.bgdock:focus-within,
+/* 展开时不再强制不透明：否则透明度按钮在鼠标悬停时永远看不出效果 */
 .bgdock--expanded {
-  opacity: 1;
+  opacity: var(--bgdock-alpha, 1);
 }
 
 /* ---------- 折叠态悬浮条 ---------- */
 
 .bgdock-bar,
 .bgdock-panel {
-  background: rgb(18 20 24 / 0.82);
-  border: 1px solid rgb(255 255 255 / 0.14);
+  background: rgb(255 255 255 / 0.94);
+  border: 1px solid rgb(15 23 42 / 0.08);
   border-radius: 14px;
   box-shadow:
-    0 10px 30px rgb(0 0 0 / 0.28),
-    inset 0 1px 0 rgb(255 255 255 / 0.06);
-  -webkit-backdrop-filter: blur(18px) saturate(1.25);
-  backdrop-filter: blur(18px) saturate(1.25);
+    0 8px 24px rgb(15 23 42 / 0.12),
+    0 1px 2px rgb(15 23 42 / 0.06),
+    inset 0 1px 0 rgb(255 255 255 / 0.9);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  backdrop-filter: blur(18px) saturate(1.2);
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .bgdock-bar,
   .bgdock-panel {
-    background: rgb(24 26 31 / 0.97);
+    background: #fff;
   }
 }
 
@@ -73,25 +73,27 @@
 }
 
 .bgdock-grip:focus-visible {
-  outline: 2px solid rgb(120 190 255);
+  outline: 2px solid rgb(99 102 241 / 0.6);
   outline-offset: 2px;
 }
 
 .bgdock-grip__label {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
+  color: rgb(51 65 85);
+  font-weight: 600;
 }
 
 .bgdock-pulse {
   inline-size: 8px;
   block-size: 8px;
   border-radius: 50%;
-  background: rgb(150 156 168);
+  background: rgb(148 163 184);
 }
 
 .bgdock-pulse--on {
-  background: rgb(86 214 160);
-  box-shadow: 0 0 0 0 rgb(86 214 160 / 0.55);
+  background: #10b981;
+  box-shadow: 0 0 0 0 rgb(16 185 129 / 0.45);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -102,7 +104,7 @@
 
 @keyframes bgdock-breathe {
   to {
-    box-shadow: 0 0 0 6px rgb(86 214 160 / 0);
+    box-shadow: 0 0 0 6px rgb(16 185 129 / 0);
   }
 }
 
@@ -117,23 +119,27 @@
   padding: 0 4px;
   border-radius: 6px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  background: rgb(255 255 255 / 0.08);
-  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(241 245 249);
+  border: 1px solid rgb(15 23 42 / 0.06);
 }
 
 .bgdock-chip--training {
-  color: rgb(140 196 255);
+  color: #4f46e5;
+  background: rgb(99 102 241 / 0.1);
 }
 .bgdock-chip--inference {
-  color: rgb(196 168 255);
+  color: #7c3aed;
+  background: rgb(139 92 246 / 0.1);
 }
 .bgdock-chip--mining {
-  color: rgb(255 196 120);
+  color: #b45309;
+  background: rgb(245 158 11 / 0.12);
 }
 .bgdock-chip--sync {
-  color: rgb(130 222 190);
+  color: #047857;
+  background: rgb(16 185 129 / 0.12);
 }
 
 /* ---------- 负载 ---------- */
@@ -141,51 +147,90 @@
 .bgdock-load {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-inline-start: auto;
+  gap: 7px;
+}
+
+/* 面板里：标题行下方一块 2×2 网格——标签在左、数值右对齐、进度条铺满整格。
+   300px 面板放 4 个横排会挤到换行，2×2 是这块宽度下最稳的排法。 */
+.bgdock-panel > .bgdock-load {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 18px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgb(248 250 252);
+  border: 1px solid rgb(15 23 42 / 0.05);
+}
+
+.bgdock-panel > .bgdock-load .bgdock-meter {
+  min-inline-size: 0;
+  grid-template-columns: 1fr auto;
+  gap: 2px 6px;
+}
+
+.bgdock-panel > .bgdock-load .bgdock-meter__label {
+  font-size: 9px;
+}
+
+.bgdock-panel > .bgdock-load .bgdock-meter__value {
+  font-size: 11px;
+  text-align: end;
+}
+
+.bgdock-panel > .bgdock-load .bgdock-meter__track {
+  margin-block-start: 3px;
 }
 
 .bgdock-meter {
   display: inline-grid;
   grid-template-columns: auto auto;
   align-items: center;
-  gap: 2px 4px;
+  gap: 2px 5px;
   font-variant-numeric: tabular-nums;
 }
 
 .bgdock-meter__label {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  color: rgb(255 255 255 / 0.45);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: rgb(100 116 139);
 }
 
 .bgdock-meter__value {
-  font-size: 11px;
-  color: rgb(255 255 255 / 0.86);
+  font-size: 10px;
+  font-weight: 700;
+  color: rgb(15 23 42);
 }
 
 .bgdock-meter__track {
   grid-column: 1 / -1;
   display: block;
-  block-size: 2px;
-  border-radius: 2px;
-  background: rgb(255 255 255 / 0.12);
+  block-size: 3px;
+  border-radius: 3px;
+  background: rgb(15 23 42 / 0.1);
   overflow: clip;
 }
 
+/* 状态语义：绿=正常、黄=警告、红=严重（与 A 股涨跌红绿是两套） */
 .bgdock-meter__fill {
   display: block;
   block-size: 100%;
   border-radius: inherit;
-  background: rgb(120 190 255);
-  transition: inline-size 400ms ease-out;
+  background: #10b981;
+  box-shadow: 0 0 4px rgb(16 185 129 / 0.35);
+  transition: inline-size 400ms ease-out, background 200ms linear;
 }
 
 .bgdock-meter--warm .bgdock-meter__fill {
-  background: rgb(255 196 120);
+  background: #f59e0b;
+  box-shadow: 0 0 4px rgb(245 158 11 / 0.35);
 }
 .bgdock-meter--hot .bgdock-meter__fill {
-  background: rgb(255 122 110);
+  background: #ef4444;
+  box-shadow: 0 0 4px rgb(239 68 68 / 0.4);
+}
+.bgdock-meter--idle .bgdock-meter__fill {
+  background: rgb(148 163 184);
+  box-shadow: none;
 }
 
 /* ---------- 展开面板 ---------- */
@@ -195,7 +240,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  inline-size: min(388px, calc(100vw - 24px));
+  inline-size: min(300px, calc(100vw - 24px));
 }
 
 .bgdock-panel__head {
@@ -205,12 +250,13 @@
 }
 
 .bgdock-panel__title {
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.02em;
+  color: rgb(15 23 42);
 }
 
 .bgdock-panel__count {
-  color: rgb(255 255 255 / 0.5);
+  color: rgb(100 116 139);
   font-variant-numeric: tabular-nums;
 }
 
@@ -219,9 +265,9 @@
   inline-size: 22px;
   block-size: 22px;
   border-radius: 7px;
-  border: 1px solid rgb(255 255 255 / 0.14);
-  background: rgb(255 255 255 / 0.06);
-  color: rgb(255 255 255 / 0.75);
+  border: 1px solid rgb(15 23 42 / 0.08);
+  background: rgb(248 250 252);
+  color: rgb(100 116 139);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
@@ -240,9 +286,9 @@
   align-items: center;
   justify-content: center;
   border-radius: 6px;
-  border: 1px solid rgb(255 255 255 / 0.14);
-  background: rgb(255 255 255 / 0.06);
-  color: rgb(255 255 255 / 0.6);
+  border: 1px solid rgb(15 23 42 / 0.08);
+  background: rgb(248 250 252);
+  color: rgb(100 116 139);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
@@ -250,22 +296,22 @@
 }
 
 .bgdock-bar__close:hover {
-  background: rgb(255 255 255 / 0.16);
-  color: rgb(255 255 255 / 0.95);
+  background: rgb(241 245 249);
+  color: rgb(15 23 42);
 }
 
 .bgdock-bar__close:focus-visible {
-  outline: 2px solid rgb(120 190 255);
+  outline: 2px solid rgb(99 102 241 / 0.6);
   outline-offset: 1px;
 }
 
 .bgdock-icon:hover {
-  background: rgb(255 255 255 / 0.14);
-  color: rgb(255 255 255 0.95);
+  background: rgb(241 245 249);
+  color: rgb(15 23 42);
 }
 
 .bgdock-icon:focus-visible {
-  outline: 2px solid rgb(120 190 255);
+  outline: 2px solid rgb(99 102 241 / 0.6);
   outline-offset: 1px;
 }
 
@@ -280,20 +326,20 @@
 
 .bgdock-empty {
   margin: 4px 2px;
-  color: rgb(255 255 255 / 0.5);
+  color: rgb(100 116 139);
 }
 
 .bgdock-row {
   display: flex;
   align-items: stretch;
   border-radius: 10px;
-  border: 1px solid transparent;
-  background: rgb(255 255 255 / 0.04);
+  border: 1px solid rgb(15 23 42 / 0.06);
+  background: rgb(248 250 252);
 }
 
 .bgdock-row:hover {
-  background: rgb(255 255 255 / 0.09);
-  border-color: rgb(255 255 255 / 0.12);
+  background: rgb(241 245 249);
+  border-color: rgb(15 23 42 / 0.1);
 }
 
 .bgdock-row__main {
@@ -313,7 +359,7 @@
 }
 
 .bgdock-row__main:focus-visible {
-  outline: 2px solid rgb(120 190 255);
+  outline: 2px solid rgb(99 102 241 / 0.6);
   outline-offset: -2px;
 }
 
@@ -321,22 +367,22 @@
   flex: none;
   inline-size: 26px;
   border: 0;
-  border-inline-start: 1px solid rgb(255 255 255 / 0.1);
+  border-inline-start: 1px solid rgb(15 23 42 / 0.06);
   border-radius: 0 10px 10px 0;
   background: transparent;
-  color: rgb(255 255 255 / 0.5);
+  color: rgb(100 116 139);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
 }
 
 .bgdock-row__cancel:hover {
-  background: rgb(255 122 110 / 0.18);
-  color: rgb(255 190 185);
+  background: rgb(244 63 94 / 0.1);
+  color: #e11d48;
 }
 
 .bgdock-row__cancel:focus-visible {
-  outline: 2px solid rgb(120 190 255);
+  outline: 2px solid rgb(99 102 241 / 0.6);
   outline-offset: -2px;
 }
 
@@ -345,18 +391,18 @@
   block-size: 6px;
   margin-block-start: 5px;
   border-radius: 50%;
-  background: rgb(150 156 168);
+  background: rgb(148 163 184);
   flex: none;
 }
 
 .bgdock-row__dot--running {
-  background: rgb(86 214 160);
+  background: #10b981;
 }
 .bgdock-row__dot--queued {
-  background: rgb(255 196 120);
+  background: #f59e0b;
 }
 .bgdock-row__dot--failed {
-  background: rgb(255 122 110);
+  background: #ef4444;
 }
 
 .bgdock-row__body {
@@ -377,20 +423,22 @@
 .bgdock-row__kind {
   flex: none;
   font-size: 10px;
+  font-weight: 600;
   padding: 0 4px;
   border-radius: 4px;
-  background: rgb(255 255 255 / 0.09);
-  color: rgb(255 255 255 / 0.72);
+  background: rgb(99 102 241 / 0.1);
+  color: #4f46e5;
 }
 
 .bgdock-row__title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: rgb(15 23 42);
 }
 
 .bgdock-row__meta {
-  color: rgb(255 255 255 / 0.5);
+  color: rgb(100 116 139);
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -406,7 +454,7 @@
   inline-size: 100%;
   block-size: 4px;
   border-radius: 2px;
-  background: rgb(255 255 255 / 0.12);
+  background: rgb(15 23 42 / 0.08);
 }
 
 .bgdock-row__bar::-webkit-progress-bar {
@@ -414,13 +462,13 @@
 }
 
 .bgdock-row__bar::-webkit-progress-value {
-  background: rgb(120 190 255);
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
   border-radius: 2px;
   transition: inline-size 0.3s;
 }
 
 .bgdock-row__bar::-moz-progress-bar {
-  background: rgb(120 190 255);
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
   border-radius: 2px;
   transition: inline-size 0.3s;
 }

@@ -360,6 +360,32 @@ def _mark_run(market: str, date_str: str) -> None:
     )
 
 
+def _trigger_timing_snapshot() -> dict[str, Any]:
+    """A 股日线同步落库后，链式重算机构择时快照。
+
+    背景：择时的 beat 在 17:10，A 股同步在 20:55，快照永远跑在当天数据之前，
+    ``latest.json`` 的信号日停在 T-1，而它预测的 T+1 已经在当天早上发生过。
+    这里在同步完成后立刻排队重算一次，让信号日 = 当天收盘。
+
+    - 只排队不内联，避免把同步任务拖到硬超时；
+    - 开关 ``MARKET_TIMING_CHAIN_AFTER_SYNC``（默认 true）；
+    - 任何异常只记录，不影响同步结果。
+    """
+    if os.getenv("MARKET_TIMING_CHAIN_AFTER_SYNC", "true").lower() != "true":
+        return {"status": "disabled"}
+    try:
+        from backend.services.engine.qlib_app.celery_config import celery_app
+
+        celery_app.send_task("engine.tasks.market_timing_v2_snapshot")
+        logger.info("[SyncSchedule] A 股同步完成，已排队重算机构择时快照")
+        return {"status": "queued"}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[SyncSchedule] 链式触发机构择时快照失败: %s", exc, exc_info=True
+        )
+        return {"status": "error", "reason": str(exc)}
+
+
 def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """执行指定市场的同步（按配置的数据集/天数）。"""
     days = int(cfg.get("days") or 5)
@@ -374,6 +400,7 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
         # 不跳过 PG：QuantDB 同步完成后滚动刷新 stock_daily_latest 最近 N 天
         # （run_daily_sync Phase 2，自带「QuantDB 未推进则跳过」门控）。
         result["result"] = run_daily_sync(skip_pg=False)
+        result["timing_snapshot"] = _trigger_timing_snapshot()
         return result
 
     if market == "CUSTOM":

@@ -26,9 +26,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def _run_refresh() -> None:
+def _run_refresh(tenant_id: str | None, user_id: str | None) -> None:
     try:
-        refresh_snapshot(force=True)
+        refresh_snapshot(force=True, tenant_id=tenant_id, user_id=user_id)
         _refresh_state.update({"error": None, "finished_at": _now()})
     except Exception as exc:  # noqa: BLE001
         _refresh_state.update({"error": str(exc)[:300], "finished_at": _now()})
@@ -38,9 +38,10 @@ def _run_refresh() -> None:
 
 @router.get("")
 async def get_timing_v2(current_user: dict = Depends(get_current_user)) -> dict:
-    """返回最近一次盘后快照；缺失时返回 404，由前端展示空态。"""
-    _ = current_user
-    snapshot = load_snapshot()
+    """返回最近一次盘后快照；优先读**当前用户作用域**的快照，缺失时回落到全局。"""
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    snapshot = load_snapshot(tenant_id, user_id or None)
     if snapshot is None or snapshot.get("status") == "missing":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -52,11 +53,16 @@ async def get_timing_v2(current_user: dict = Depends(get_current_user)) -> dict:
 
 @router.post("/refresh")
 async def refresh_timing_v2(current_user: dict = Depends(get_current_user)) -> dict:
-    """异步重算快照（管理员；重建市场面板 + 训练 MLP，约 2-4 分钟）。"""
+    """异步重算快照（管理员；重建市场面板 + 训练 MLP，约 2-4 分钟）。
+
+    只扫**当前用户**的模型库，快照写 `latest_{tenant}_{user}.json`，不影响其他用户。
+    """
     if not current_user.get("is_admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限"
         )
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "") or None
     with _refresh_lock:
         if _refresh_state["running"]:
             return {"status": "running", **_refresh_state}
@@ -64,7 +70,10 @@ async def refresh_timing_v2(current_user: dict = Depends(get_current_user)) -> d
             {"running": True, "started_at": _now(), "finished_at": None, "error": None}
         )
     threading.Thread(
-        target=_run_refresh, name="market-timing-v2-refresh", daemon=True
+        target=_run_refresh,
+        args=(tenant_id, user_id),
+        name="market-timing-v2-refresh",
+        daemon=True,
     ).start()
     return {"status": "accepted", **_refresh_state}
 

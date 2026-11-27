@@ -26,6 +26,7 @@ export interface ServerLoad {
     util_pct: number;
     mem_used_mb: number;
     mem_total_mb: number;
+    temp_c?: number | null;
   } | null;
 }
 

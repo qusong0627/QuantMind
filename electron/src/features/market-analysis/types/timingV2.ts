@@ -18,8 +18,22 @@ export interface TimingV2HistoryPoint {
   tft_z: number | null;
   mlp_z: number | null;
   exposure: number | null;
+  exposure_alt?: number | null;
   tft_pred_mean: number | null;
   mlp_pred: number | null;
+}
+
+export interface TimingV2Equity {
+  dates: string[];
+  combined: number[];
+  tft_only: number[];
+  buy_hold: number[];
+  shadow_mlp_raw?: number[];
+}
+
+export interface TimingV2MonthlyPoint {
+  month: string;
+  ret: number;
 }
 
 export interface TimingV2Snapshot {
@@ -32,8 +46,11 @@ export interface TimingV2Snapshot {
   as_of: string;
   stale_trading_days: number;
   market: string;
+  /** tft_mlp = 战术层+战略层；mlp_only = 没找到战术层模型，降级为 MLP 单层 */
+  mode?: 'tft_mlp' | 'mlp_only' | string;
   tft_model: {
-    model_id: string;
+    model_id: string | null;
+    source?: string;
     role: string;
     pred_mean: number | null;
     pred_bottom20: number | null;
@@ -53,6 +70,8 @@ export interface TimingV2Snapshot {
     rule: string;
     execution: string;
     confidence: string;
+    exposure_alt?: number | null;
+    rule_alt?: string;
   };
   structure: {
     breadth: number | null;
@@ -71,6 +90,9 @@ export interface TimingV2Snapshot {
     tft_only: TimingV2Metrics;
     mlp_only: TimingV2Metrics;
     buy_hold: TimingV2Metrics;
+    shadow_mlp_raw?: TimingV2Metrics;
+    equity?: TimingV2Equity;
+    monthly?: TimingV2MonthlyPoint[];
     placebo_p: number | null;
     mlp_long_history: {
       window: { start: string; end: string | null };

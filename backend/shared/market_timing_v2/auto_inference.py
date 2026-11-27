@@ -18,7 +18,7 @@ from typing import Any
 import pandas as pd
 
 from .history import build_market_history
-from .signals import TFT_MODEL_ID, build_snapshot, load_tft_history
+from .signals import TFT_MODEL_ID, build_snapshot, load_tft_history, resolve_tft_model
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,21 @@ def missing_signal_dates(
     return dates
 
 
-def ensure_tft_inference(history: pd.DataFrame, tft: pd.DataFrame) -> dict[str, Any]:
-    """把 TFT pred 补到行情最新日；返回可审计的补推理摘要。"""
+def ensure_tft_inference(
+    history: pd.DataFrame,
+    tft: pd.DataFrame,
+    model_id: str | None = None,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """把 TFT pred 补到行情最新日；返回可审计的补推理摘要。
+
+    model_id / tenant_id / user_id 由调用方按「战术层实际解析结果」传进来，
+    不传则回落到环境变量里的默认值（旧行为）。
+    """
+    tid = str(tenant_id or TENANT_ID)
+    uid = str(user_id or USER_ID)
+    mid = str(model_id or TFT_MODEL_ID)
     latest_tft = pd.to_datetime(tft["date"]).max() if not tft.empty else None
     data_as_of = pd.to_datetime(history["date"]).max()
     dates = missing_signal_dates(history, latest_tft)
@@ -94,9 +107,9 @@ def ensure_tft_inference(history: pd.DataFrame, tft: pd.DataFrame) -> dict[str, 
         from backend.shared.model_registry import model_registry_service
 
         resolved = model_registry_service.resolve_effective_model_sync(
-            tenant_id=TENANT_ID,
-            user_id=USER_ID,
-            model_id=TFT_MODEL_ID,
+            tenant_id=tid,
+            user_id=uid,
+            model_id=mid,
             market="CN",
         )
         if not str(resolved.get("storage_path") or "").strip():
@@ -108,9 +121,9 @@ def ensure_tft_inference(history: pd.DataFrame, tft: pd.DataFrame) -> dict[str, 
             try:
                 result = router.run_daily_inference_script(
                     date=day,
-                    tenant_id=TENANT_ID,
-                    user_id=USER_ID,
-                    model_id=TFT_MODEL_ID,
+                    tenant_id=tid,
+                    user_id=uid,
+                    model_id=mid,
                     resolved_model=resolved,
                     market="CN",
                     persist=True,
@@ -140,12 +153,32 @@ def ensure_tft_inference(history: pd.DataFrame, tft: pd.DataFrame) -> dict[str, 
         return info
 
 
-def refresh_snapshot(*, force: bool = True) -> dict[str, Any]:
+def refresh_snapshot(
+    *, force: bool = True, tenant_id: str | None = None, user_id: str | None = None
+) -> dict[str, Any]:
     """构建行情面板 → 需要时补推理 TFT → 生成快照（单次完整刷新）。"""
     history = build_market_history(force=force)
-    tft = load_tft_history()
-    info = ensure_tft_inference(history, tft)
-    snapshot = build_snapshot(force=False, history=history, inference_info=info)
+    resolved_id, _, _ = resolve_tft_model(tenant_id, user_id)
+    tft = load_tft_history(tenant_id, user_id)
+    if resolved_id:
+        info = ensure_tft_inference(history, tft, resolved_id, tenant_id, user_id)
+    else:
+        # 没有战术层模型（降级 MLP 单层）：不做任何补推理
+        info = {
+            "enabled": False,
+            "status": "no_tactical_model",
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": [],
+            "missing_dates": [],
+        }
+    snapshot = build_snapshot(
+        force=False,
+        history=history,
+        inference_info=info,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
     logger.info(
         "[market-timing-v2] inference=%s attempted=%s succeeded=%s tft=%s",
         info.get("status"),
