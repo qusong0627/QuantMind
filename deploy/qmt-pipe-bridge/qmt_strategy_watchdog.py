@@ -45,6 +45,10 @@ import time
 from dataclasses import dataclass, field
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
+import bridge_stability as stability  # noqa: E402
+
 CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 STATE_KEY = 'qm:qmt:strategy:watchdog'
 METRICS_KEY = 'qm:qmt:pipe:metrics'
@@ -81,6 +85,13 @@ DEFAULT_CONFIG = {
     # 2026-11-06 两次现场 11:28:40 / 11:32:45）。
     'bridge_restart_after_s': 60,
     'bridge_restart_max_per_hour': 6,
+    # 重启风暴护栏（2026-11-27 加固）：指数退避 + 30 分钟 ≥4 次判风暴停止自动
+    # 重启，交人工在 QMT 编辑器里恢复；时间戳只留最近 50 条/24h（旧实现无限增长）。
+    'bridge_restart_backoff_base_s': 60,
+    'bridge_restart_backoff_max_s': 1800,
+    'bridge_restart_storm_threshold': 4,
+    'bridge_restart_storm_window_s': 1800,
+    'bridge_restart_stamp_keep': 50,
     'bridge_start_cmd': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd',
     'bridge_pid_file': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\data\pipe_bridge.pid',
     'bridge_script': r'C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\qmt-external-bridge\pipe_redis_bridge.py',
@@ -202,6 +213,17 @@ def evaluate(
     reload_count = int(prev.get('reload_count') or 0)
     if str(prev.get('day') or '') != day:
         reload_count = 0
+    restart_cfg = stability.RestartConfig(
+        base_backoff_s=float(cfg['bridge_restart_backoff_base_s']),
+        max_backoff_s=float(cfg['bridge_restart_backoff_max_s']),
+        hourly_max=int(cfg['bridge_restart_max_per_hour']),
+        storm_threshold=int(cfg['bridge_restart_storm_threshold']),
+        storm_window_s=float(cfg['bridge_restart_storm_window_s']),
+        stamp_keep=int(cfg['bridge_restart_stamp_keep']),
+        stamp_max_age_s=float(cfg['state_ttl_s']),
+    )
+    capped_stamps = stability.cap_stamps(
+        stability.parse_stamps(prev.get('bridge_restart_ts')), now_ts, restart_cfg)
     state = {
         'day': day,
         'failures': int(prev.get('failures') or 0),
@@ -209,7 +231,8 @@ def evaluate(
         'reload_count': reload_count,
         # 本次 unresponsive 的起始时间（桥重启判定用）：成功即刻清零。
         'unresponsive_since': float(prev.get('unresponsive_since') or 0.0),
-        'bridge_restart_ts': str(prev.get('bridge_restart_ts') or ''),
+        # 重启时间戳在**写侧就裁剪**（最近 50 条/24h），不再无限增长。
+        'bridge_restart_ts': ','.join(str(int(x)) for x in capped_stamps),
     }
 
     if not probe.reachable:
@@ -249,7 +272,15 @@ def evaluate(
     # 行情 Tap 注册丢失（`[v2] quote tap installed` 不再出现），之后只能人工在
     # QMT 编辑器里停止/运行策略——"每次都要重启"就是先 reload 造成的。
     if bool(cfg.get('prefer_bridge_restart', True)):
-        allowed, why = should_restart_bridge(state, now_ts, cfg)
+        allowed, why, storm = should_restart_bridge(state, now_ts, cfg)
+        if storm:
+            return Decision(
+                'alert',
+                'restart storm（%s）；自动重启已停止，请在 QMT 策略编辑器里'
+                '停止→运行策略' % why,
+                failures,
+                state,
+            )
         if allowed:
             return Decision('restart_bridge', f'account hung; {why}',
                             failures, state)
@@ -271,7 +302,15 @@ def evaluate(
     # 旧顺序（先 reload）：仅当显式配置 prefer_bridge_restart=false 时使用。
     if now_ts - state['last_reload_ts'] < float(cfg['reload_cooldown_s']):
         # reload 冷却中也不该干等：桥重启（断管道）是更轻、更快的恢复手段。
-        allowed, why = should_restart_bridge(state, now_ts, cfg)
+        allowed, why, storm = should_restart_bridge(state, now_ts, cfg)
+        if storm:
+            return Decision(
+                'alert',
+                'restart storm（%s）；自动重启已停止，请在 QMT 策略编辑器里'
+                '停止→运行策略' % why,
+                failures,
+                state,
+            )
         if allowed:
             return Decision('restart_bridge', f'account hung; {why}',
                             failures, state)
@@ -287,28 +326,35 @@ def evaluate(
 
 
 def should_restart_bridge(prev: dict, now_ts: float,
-                          cfg: dict | None = None) -> tuple[bool, str]:
+                          cfg: dict | None = None) -> tuple[bool, str, bool]:
     """reload 救不回来时，是否该重启伴生桥（纯函数）。
 
-    实测（2026-11-06 两次现场 11:28:40 / 11:32:45）：断开管道连接能让卡在
-    QMT C++ 调用里的策略主线程立刻解锁；而空载 7 分钟不会自愈。所以「挂死后
-    重启桥」是唯一不需要人工去 QMT 点重启的恢复手段。加冷却窗与小时上限，
-    防止把桥当成重启风暴的开关。
+    返回 ``(allowed, reason, storm)``。``storm=True`` 表示 30 分钟内已重启太多次，
+    **自动重启已经救不回来**：调用方必须停止重启并告警，交人工在 QMT 策略编辑器
+    里停止/运行策略（再自动重启只会拉长账户空窗，并让状态键越积越大）。
     """
     cfg = {**DEFAULT_CONFIG, **(cfg or {})}
     since = float(prev.get('unresponsive_since') or 0.0)
     if since <= 0:
-        return False, 'not unresponsive'
+        return False, 'not unresponsive', False
     waited = now_ts - since
     threshold = float(cfg['bridge_restart_after_s'])
     if waited < threshold:
-        return False, f'unresponsive {waited:.0f}s < {int(threshold)}s'
-    stamps = [float(x) for x in str(prev.get('bridge_restart_ts') or '').split(',')
-              if x]
-    recent = [s for s in stamps if now_ts - s < 3600]
-    if len(recent) >= int(cfg['bridge_restart_max_per_hour']):
-        return False, 'bridge restart hourly budget exhausted'
-    return True, f'unresponsive {waited:.0f}s'
+        return False, 'unresponsive %.0fs < %ds' % (waited, int(threshold)), False
+    stamps = stability.parse_stamps(prev.get('bridge_restart_ts'))
+    restart_cfg = stability.RestartConfig(
+        base_backoff_s=float(cfg['bridge_restart_backoff_base_s']),
+        max_backoff_s=float(cfg['bridge_restart_backoff_max_s']),
+        hourly_max=int(cfg['bridge_restart_max_per_hour']),
+        storm_threshold=int(cfg['bridge_restart_storm_threshold']),
+        storm_window_s=float(cfg['bridge_restart_storm_window_s']),
+        stamp_keep=int(cfg['bridge_restart_stamp_keep']),
+        stamp_max_age_s=float(cfg['state_ttl_s']),
+    )
+    decision = stability.restart_decision(stamps, now_ts, restart_cfg)
+    if not decision.allowed:
+        return False, decision.reason, bool(decision.storm)
+    return True, 'unresponsive %.0fs' % waited, False
 
 
 # ---------------------------------------------------------------------------
@@ -640,15 +686,34 @@ def main(argv: list[str] | None = None) -> int:
         if queue_has_orders:
             return Decision('alert', f'{why}; order rpc in flight, bridge restart '
                             'deferred - check manually', dec.failures, dec.state)
-        allowed, reason = should_restart_bridge(dec.state, time.time(), cfg)
+        allowed, reason, storm = should_restart_bridge(
+            dec.state, time.time(), cfg)
+        if storm:
+            return Decision(
+                'alert',
+                f'{why}; {reason} - restart the strategy in QMT strategy editor',
+                dec.failures,
+                dec.state,
+            )
         if not allowed:
             return Decision('alert', f'{why}; bridge restart skipped ({reason}) - '
                             'restart the strategy in QMT strategy editor',
                             dec.failures, dec.state)
-        stamps = [s for s in str(dec.state.get('bridge_restart_ts') or '').split(',')
-                  if s]
-        stamps.append(str(int(time.time())))
-        dec.state['bridge_restart_ts'] = ','.join(stamps)
+        restart_cfg = stability.RestartConfig(
+            base_backoff_s=float(cfg['bridge_restart_backoff_base_s']),
+            max_backoff_s=float(cfg['bridge_restart_backoff_max_s']),
+            hourly_max=int(cfg['bridge_restart_max_per_hour']),
+            storm_threshold=int(cfg['bridge_restart_storm_threshold']),
+            storm_window_s=float(cfg['bridge_restart_storm_window_s']),
+            stamp_keep=int(cfg['bridge_restart_stamp_keep']),
+            stamp_max_age_s=float(cfg['state_ttl_s']),
+        )
+        stamps = stability.append_stamp(
+            stability.parse_stamps(dec.state.get('bridge_restart_ts')),
+            time.time(),
+            restart_cfg,
+        )
+        dec.state['bridge_restart_ts'] = ','.join(str(int(x)) for x in stamps)
         started = _restart_bridge(cfg)
         print(f'{stamp} BRIDGE RESTART started={started}')
         if not started:

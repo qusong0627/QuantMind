@@ -104,6 +104,7 @@ if (-not $running) {
     Write-Log "HEALTH $health restarting"
 }
 
-$cmd = "cmd.exe /c `"$base\start_pipe_bridge.cmd`""
+$launcher = Join-Path $base 'start_pipe_bridge.ps1'
+$cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$launcher`""
 $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
 Write-Log "STARTED rc=$($r.ReturnValue) pid=$($r.ProcessId)"

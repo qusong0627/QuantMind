@@ -171,14 +171,15 @@ tick；而 `ping` 与行情方法跑在后台 listener 线程，仍然正常—�
    `bridge_config.json`。
 2. 复制本仓 `deploy/qmt-pipe-bridge/` 下：
    `pipe_redis_bridge.py`、`bridge_gates.py`、`bridge_account_state.py`、
-   `bridge_order_intent.py`、`bridge_health.py`、`bridge_ops.py`、
-   `qmt_strategy_watchdog.py` 到 `qmt-tools\`（覆盖）；
+   `bridge_order_intent.py`、`bridge_stability.py`、`bridge_health.py`、`bridge_ops.py`、
+   `qmt_strategy_watchdog.py` 到 `qmt-tools\`（覆盖）；**整个
+   `qmt_today_cache\` 目录**复制到 `qmt-tools\qmt-external-bridge\`（V1 今日行情缓存）；
    `pipe_watchdog.ps1` 到 `qmt-tools\`（覆盖）；`bridge_config.example.json`
    只作合并参考，**不要覆盖**你的 `bridge_config.json`。
-3. 把 **`rpc` / `startup` / `budget` / `tap` / `sweep` / `watchdog`** 这几段按新
-   example 合并进 `bridge_config.json`（尤其 `watchdog.prefer_bridge_restart=true`、
-   `rpc.trade_min_interval_s=3`、`rpc.internal_trade_min_interval_s=2`、
-   `startup.grace_s=8`、`startup.step_s=3`）。
+3. 把 **`rpc` / `startup` / `budget` / `tap` / `sweep` / `today_cache` / `watchdog`**
+   这几段按新 example 合并进 `bridge_config.json`（尤其
+   `watchdog.prefer_bridge_restart=true`、`rpc.trade_min_interval_s=3`、
+   `rpc.internal_trade_min_interval_s=2`、`startup.grace_s=8`、`startup.step_s=3`）。
 4. 复制本仓 `deploy/qmt-bridge-kit/bigqmt_signal_trader/redis_rpc.py` 到 QMT
    python 目录下的 `bigqmt_signal_trader\`（覆盖）；如果 `ping` 的
    `quote_push_ready` 仍为 false，再把 `bigqmt_signal_trader_strategy.py` /
@@ -195,6 +196,91 @@ tick；而 `ping` 与行情方法跑在后台 listener 线程，仍然正常—�
 7. 若 `quote_push_ready=false`：先查 QMT python 目录
    `bigqmt_signal_trader_local_config.py` 里 `quote_push.enabled` 是否被显式关掉；
    否则就是策略文件旧，按第 4 步停/运行一次。
+
+## 2026-11-27 稳定性加固（自适应调速 / 交易只读缓存 / 重启风暴护栏）
+
+「QMT 在线·账户滞后」的根因是 adjust 主线程被 `get_trade_detail_data` 挂死，
+而容器轮询与桥内轮询仍在按固定速率加压。本次加固（详见
+`docs/QMT桥稳定性加固_机构级细案_20261127.md`）：
+
+- **自适应 Governor**（`bridge_stability.py`）：交易查询 EWMA 延迟 > `health.slow_ms`
+  （默认 1200ms）即把间隔翻倍，失败再翻倍（封顶 `health.max_multiplier=8`），
+  连续 `health.recover_ok=3` 次健康才逐级减半；`qm:qmt:pipe:metrics.governor_multiplier`
+  可直接看到当前倍率。
+- **交易只读短缓存**：`get_asset/get_positions` 2s、`query_orders/query_trades` 1s；
+  订单/撤单方法永不缓存，且成功后立即 `invalidate`。指标 `trade_cache_hits/misses`。
+- **重启风暴护栏**：`qmt_strategy_watchdog.py` 对 `bridge_restart_ts` 做 50 条/24h
+  裁剪 + 指数退避（60s→…→30min）+ 30 分钟 ≥4 次判风暴并**停止自动重启**，
+  告警要求人工在 QMT 编辑器停止→运行策略。
+- 新增配置键见 `bridge_config.example.json`：`rpc.trade_read_cache_*`、
+  `health.slow_ms/very_slow_ms/ewma_alpha/max_multiplier/recover_ok`、
+  `watchdog.bridge_restart_backoff_*/storm_*/stamp_keep`。旧配置不写也按默认值运行。
+
+客户端侧（QuantMind 后端）同步加固：QMT 非当前交易券商时执行轮询自动空转
+（有未平 QMT 单仍低频对账）；桥不健康时指数退避 5s→120s；账户同步对陈旧/空账户
+分级退避；`qmt_pipe_guard` 读取 `qm:qmt:strategy:watchdog`，对「主线程卡死 >
+180s / 重启风暴」告警；**推送按相关性门控**（QMT 是当前券商或有未平单才推），
+Tap 未装配默认只作为状态展示（`QM_QMT_ALERT_TAP_DISABLED=true` 才告警）。
+
+## 2026-11-28 今日行情缓存 V1+V2+V3（快照 / 1m / 热集 tick / 3s 全市场）
+
+- 新增 `qmt_today_cache/`：内存最新快照、1m 聚合、热集 tick 环、全市场 3s 快照、Parquet part/manifest、异步写线程；
+- 桥的 `get_full_tick` 命中内存直接回包；新增只读方法 `cache_today_1m`（列式，单次 ≤600 只）、
+  `cache_hot_ticks`（列式，单次 ≤800 只，带 `stale/age_ms/gap`）、`cache_status`；
+  `get_market_data_ex` / 订单/撤单**原样透传**；
+- 落盘：`type=bar1m`（30 天）、`type=tick_hot`（10 天）、`type=snapshot3s`（全市场 3s，5 天）；
+- **V3 来源键**：QMT 写 `market:snapshot:qmt:{后缀}`，TDX 写 `market:snapshot:tdx:{前缀小写}`；
+  canonical `market:snapshot` 保持不变；后端 `unified_quote_cache` 合并并可选写 `market:snapshot:merged:{后缀}`；
+- 默认 `today_cache.enabled=true`；`false` 时完全透传，行为与旧版一致；`snapshot3s_enabled` 可单独关；
+- 落盘目录 `qmt-tools/data/cache/qmt/date=YYYYMMDD/type=.../hour=HH/part-*.parquet`；
+- **pyarrow 预检**（写在桥的 Python 环境里）：
+  ```powershell
+  "C:\Program Files\Python312\python.exe" -c "import pyarrow; print(pyarrow.__version__)"
+  ```
+  没有 pyarrow 时自动降级 `.jsonl.gz` spool（状态 `cache_degraded=1`），桥照常运行；
+- 状态：`qm:qmt:pipe:metrics` 的 `cache_*` 字段（含 `cache_hot_*`、`cache_snapshot3s_*`）；或 RPC `cache_status`；
+- 后端 `qmt_cache_parquet.py` 用 DuckDB 读 `/mnt/tdx-shared/bridge-windows/qmt-tools/data/cache/qmt`（可用 `QM_QMT_CACHE_DIR` 覆盖）；
+- 回滚：`bridge_config.json` 里 `today_cache.enabled=false` 重启桥，或还原 `.bak` 文件。
+
+## 2026-11-27 稳定启动/重启（不残留旧进程）
+
+新增文件：
+- `start_pipe_bridge.ps1`：稳定启动器
+  - 全局互斥锁，串行化并发启动；
+  - 只杀**可证实是桥**的进程：PID 文件 PID、17719/17720 端口 owner、命令行含 `pipe_redis_bridge`；
+  - 端口被其他程序占用时 **拒绝启动**（不会误杀 TQ/文件桥）；
+  - 通过 `Win32_Process.Create` 分离启动，**不随 SSH/RDP 会话断开而死**；
+  - 启动后等待 17720 监听，30 秒不通返回非 0；
+  - 日志 `logs/start_pipe_bridge.log`。
+- `start_pipe_bridge.cmd`：包装器，调用上面的 ps1（双击/命令行均可）；
+- `start_pipe_bridge_raw.cmd`：原来的裸 python 启动命令（由 ps1 调用，不要直接双击）；
+- `pipe_watchdog.ps1`：看门狗改为调用 ps1 启动；
+- `register_start_pipe_bridge.ps1`：注册计划任务 `QMTTools-StartPipeBridge`（SYSTEM、最高权限、IgnoreNew）。
+
+推荐启动方式（任意 SSH/RDP 会话都能用，进程会留在后台）：
+```powershell
+Start-ScheduledTask -TaskName QMTTools-StartPipeBridge
+# 或
+cmd /c C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\start_pipe_bridge.cmd
+```
+**一键启动整个交易台**（TDX 5 项 + QMT 桥）：
+```
+C:\new_tdx_mock\PYPlugins\bridge-windows\启动交易台.cmd
+# ASCII 别名：start_trading_desk.cmd
+```
+- QMT 已在健康运行时不重启（`NOOP`）；`-Restart` 同时强制重启 TDX 与 QMT；
+- 自动化用 `-NoPause -NoUi`；一键启动会调用 `qmt-tools\cache_quality_check.py` 质检缓存与关键参数，
+  跳过用 `-NoCacheCheck`；最终打印 `TDX rc / QMT rc / CACHE rc`；
+- 该包装器调用 `scripts\launcher.ps1`（TDX）后，再调用本目录的 `start_pipe_bridge.ps1`（QMT）。
+**不要**在 SSH 里用 `Start-Process` 直接拉 `pipe_redis_bridge.py`：会话断开时子进程会被一并杀掉（本次部署实测）。
+
+验证：
+```powershell
+Get-NetTCPConnection -LocalPort 17719,17720 -State Listen | Select LocalPort,OwningProcess
+Get-Content C:\new_tdx_mock\PYPlugins\bridge-windows\qmt-tools\logs\start_pipe_bridge.log -Tail 20
+```
+
+回滚：还原 `start_pipe_bridge.cmd.bak-20261127-1814` / `pipe_watchdog.ps1.bak-20261127-1814`；`QMTTools-StartPipeBridge` 任务可保留或删除。
 
 ## 接口
 

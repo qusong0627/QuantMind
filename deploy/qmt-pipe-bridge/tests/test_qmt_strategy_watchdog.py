@@ -84,8 +84,10 @@ def test_reload_used_when_bridge_budget_exhausted():
     stamps = ','.join(str(int(now - 60 * i)) for i in range(1, 7))
     prev = {'failures': 3, 'day': time.strftime('%Y%m%d'),
             'unresponsive_since': now - 120, 'bridge_restart_ts': stamps}
+    # 关掉风暴判定，单独验证「小时预算耗尽 → 退回 reload」这条旧路径
     d = wd.evaluate(prev, _probe(account_ok=False), now_ts=now,
-                    queue_has_orders=False)
+                    queue_has_orders=False,
+                    cfg={'bridge_restart_storm_threshold': 99})
     assert d.action == 'reload'
 
 
@@ -143,9 +145,10 @@ def test_ping_failure_is_unreachable_alert_not_reload():
     assert 'unreachable' in d.reason
     # 交易时段内 ping 不通也要记时间戳：main 的 alert 分支靠它触发桥重启
     assert d.state['unresponsive_since'] == now
-    ok, why = wd.should_restart_bridge(
+    ok, why, storm = wd.should_restart_bridge(
         {**d.state, 'bridge_restart_ts': ''}, now + 61)
     assert ok, why
+    assert storm is False
 
 
 def test_ping_failure_outside_hours_does_not_arm_bridge_restart():
@@ -329,9 +332,9 @@ def test_tap_state_reads_pipe_metrics():
 def test_should_restart_bridge_requires_threshold():
     cfg = {'bridge_restart_after_s': 180, 'bridge_restart_max_per_hour': 2}
     now = 1000.0
-    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 60}, now, cfg)
+    ok, _, _ = wd.should_restart_bridge({'unresponsive_since': now - 60}, now, cfg)
     assert ok is False
-    ok, _ = wd.should_restart_bridge({'unresponsive_since': now - 200}, now, cfg)
+    ok, _, _ = wd.should_restart_bridge({'unresponsive_since': now - 200}, now, cfg)
     assert ok is True
 
 
@@ -339,21 +342,54 @@ def test_should_restart_bridge_hourly_budget():
     cfg = {'bridge_restart_after_s': 60, 'bridge_restart_max_per_hour': 2}
     now = 10000.0
     stamps = f'{int(now - 100)},{int(now - 200)}'
-    ok, reason = wd.should_restart_bridge(
+    ok, reason, _ = wd.should_restart_bridge(
         {'unresponsive_since': now - 300, 'bridge_restart_ts': stamps}, now, cfg)
     assert ok is False
     assert 'budget' in reason
     # 一小时以前的记录不计入
-    ok, _ = wd.should_restart_bridge(
+    ok, _, _ = wd.should_restart_bridge(
         {'unresponsive_since': now - 300, 'bridge_restart_ts': str(int(now - 4000))},
         now, cfg)
     assert ok is True
 
 
+def test_should_restart_bridge_storm_stops_auto_restart():
+    """30 分钟内多次重启 = 自动重启已救不回来，必须停下来交人工。"""
+    now = 10000.0
+    stamps = ','.join(str(int(now - 60 * i)) for i in range(1, 5))
+    ok, reason, storm = wd.should_restart_bridge(
+        {'unresponsive_since': now - 300, 'bridge_restart_ts': stamps}, now)
+    assert ok is False
+    assert storm is True
+    assert 'storm' in reason
+
+
+def test_evaluate_restart_storm_returns_manual_alert():
+    now = _ts(10, 2)
+    stamps = ','.join(str(int(now - 60 * i)) for i in range(1, 5))
+    d = wd.evaluate(
+        {'failures': 3, 'day': time.strftime('%Y%m%d'),
+         'unresponsive_since': now - 120, 'bridge_restart_ts': stamps},
+        _probe(account_ok=False), now_ts=now, queue_has_orders=False)
+    assert d.action == 'alert'
+    assert 'storm' in d.reason
+
+
+def test_evaluate_caps_restart_stamps_in_state():
+    now = _ts(10, 2)
+    stamps = ','.join(str(int(now - i)) for i in range(1, 101))
+    d = wd.evaluate(
+        {'failures': 3, 'day': time.strftime('%Y%m%d'),
+         'unresponsive_since': now - 120, 'bridge_restart_ts': stamps},
+        _probe(account_ok=False), now_ts=now, queue_has_orders=False)
+    assert len(str(d.state['bridge_restart_ts']).split(',')) <= 50
+
+
 def test_should_restart_bridge_not_when_healthy():
-    ok, reason = wd.should_restart_bridge({}, 1000.0)
+    ok, reason, storm = wd.should_restart_bridge({}, 1000.0)
     assert ok is False
     assert 'not unresponsive' in reason
+    assert storm is False
 
 
 def test_evaluate_tracks_unresponsive_since():

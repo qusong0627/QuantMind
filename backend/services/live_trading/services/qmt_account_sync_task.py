@@ -408,7 +408,9 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
         stale_cooldown,
     )
     last_refresh = 0.0
+    fail_streak = 0
     while True:
+        sleep_s = interval
         try:
             now = asyncio.get_running_loop().time()
             if now - last_refresh >= SETTINGS_REFRESH_SECONDS:
@@ -429,9 +431,24 @@ async def run_qmt_account_sync_task(interval_seconds: int = 30) -> None:
                 cooldown_seconds=stale_cooldown,
                 account_id=client.account_id,
             )
+            if result.get("skipped"):
+                # 陈旧/空账户：桥侧主线程不健康或休市。继续按 30s 打只会给
+                # QMT 主线程加压（2026-11-27 加固），降到 2 分钟一轮。
+                reason = str(result.get("reason") or "")
+                sleep_s = max(interval, 120.0) if reason == "stale_snapshot" else max(
+                    interval, 60.0
+                )
+                fail_streak = 0
+            elif result.get("success"):
+                fail_streak = 0
+            else:
+                fail_streak += 1
+                sleep_s = min(300.0, interval * (2 ** min(fail_streak, 4)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 常驻任务不能因单次失败退出
             health.record({"success": False, "error": str(exc)})
             logger.warning("[QmtSync] 账户同步失败: %s", exc)
-        await asyncio.sleep(interval)
+            fail_streak += 1
+            sleep_s = min(300.0, interval * (2 ** min(fail_streak, 4)))
+        await asyncio.sleep(sleep_s)

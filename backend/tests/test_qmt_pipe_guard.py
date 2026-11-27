@@ -53,6 +53,66 @@ def test_evaluate_pipe_metrics_ignores_bad_numbers():
     assert issues == []
 
 
+# --------------------------------------------------------------------------
+# 策略看门狗状态（QMT 在线·账户滞后的直接证据面）
+# --------------------------------------------------------------------------
+def test_strategy_watchdog_healthy_is_empty():
+    state = {
+        "account_ok": "1",
+        "action": "ok",
+        "quote_push_ready": "1",
+        "bridge_restart_ts": "",
+    }
+    assert g.evaluate_strategy_watchdog(state, now=10000.0) == []
+
+
+def test_strategy_watchdog_stuck_below_threshold_does_not_alert():
+    state = {
+        "account_ok": "0",
+        "action": "restart_bridge",
+        "unresponsive_since": "9950",
+    }
+    assert g.evaluate_strategy_watchdog(state, now=10000.0, stuck_max_s=180) == []
+
+
+def test_strategy_watchdog_stuck_alerts_with_span():
+    state = {
+        "account_ok": "0",
+        "action": "restart_bridge",
+        "unresponsive_since": "9700",
+    }
+    issues = g.evaluate_strategy_watchdog(state, now=10000.0, stuck_max_s=180)
+    assert any("卡死" in x and "300s" in x for x in issues)
+
+
+def test_strategy_watchdog_flags_quote_push_disabled():
+    state = {
+        "account_ok": "1",
+        "action": "ok",
+        "quote_push_ready": "0",
+    }
+    # 默认不把 Tap 未装配当故障（行情主源 TDX，QMT 全推只是备源）。
+    assert g.evaluate_strategy_watchdog(state, now=10000.0) == []
+    issues = g.evaluate_strategy_watchdog(
+        state, now=10000.0, include_quote_push=True
+    )
+    assert any("全推行情" in x for x in issues)
+
+
+def test_strategy_watchdog_flags_restart_storm():
+    stamps = ",".join(str(int(10000 - s)) for s in (60, 120, 180, 240))
+    state = {
+        "account_ok": "0",
+        "action": "alert",
+        "unresponsive_since": "9000",
+        "bridge_restart_ts": stamps,
+    }
+    issues = g.evaluate_strategy_watchdog(
+        state, now=10000.0, stuck_max_s=180, restart_storm_threshold=4
+    )
+    assert any("重启风暴" in x for x in issues)
+
+
 def test_tracker_requires_consecutive_threshold():
     tracker = g.PipeHealthTracker(hard_threshold=2)
     assert tracker.feed(["x"], now=100.0) is None

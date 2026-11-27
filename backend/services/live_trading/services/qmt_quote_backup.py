@@ -40,6 +40,7 @@ from collections.abc import Callable
 from typing import Any
 
 from backend.services.live_trading.services import trading_session
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -479,8 +480,15 @@ class QmtQuoteBackupService:
                 prefix = record["symbol"]
                 snap_key = f"market:snapshot:{prefix.lower()}"
                 series_key = f"market:series:{prefix}"
-                pipe.hset(snap_key, mapping=build_snapshot_fields(record))
+                fields = build_snapshot_fields(record)
+                pipe.hset(snap_key, mapping=fields)
                 pipe.expire(snap_key, SNAPSHOT_TTL)
+                # V3 来源键：与伴生桥的 qmt 键统一为后缀大写。
+                source_key = "market:snapshot:qmt:%s" % (
+                    StockCodeUtil.to_suffix(prefix).upper()
+                )
+                pipe.hset(source_key, mapping=fields)
+                pipe.expire(source_key, SNAPSHOT_TTL)
                 pipe.zadd(
                     series_key,
                     {

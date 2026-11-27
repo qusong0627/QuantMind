@@ -700,3 +700,73 @@ class TestUnmatchedWarningDedup:
                 _poll_on(poller, DAY)
         messages = [m for m in self._messages(caplog) if "委托无法匹配订单" in m]
         assert len(messages) == 2
+
+
+# --------------------------------------------------------------------------
+# 活跃券商门控 + 失败退避（2026-11-27 加固）
+# --------------------------------------------------------------------------
+def test_next_backoff_is_exponential_and_capped():
+    assert mod.next_backoff_s(0) == 0.0
+    assert mod.next_backoff_s(1) == 5.0
+    assert mod.next_backoff_s(2) == 10.0
+    assert mod.next_backoff_s(3) == 20.0
+    assert mod.next_backoff_s(10) == mod.BACKOFF_MAX_S
+
+
+def test_poll_decision_follows_active_broker():
+    assert mod.poll_decision(
+        env_enabled=True, active_broker="qmt_exec", has_open_orders=False
+    ) == (True, "qmt_exec is the active broker")
+    allowed, reason = mod.poll_decision(
+        env_enabled=True, active_broker="tdx", has_open_orders=False
+    )
+    assert allowed is False and "not the active broker" in reason
+
+
+def test_poll_decision_keeps_reconciling_open_qmt_orders():
+    """券商切到 TDX 后，QMT 遗留未平单仍要低频对账，不能失联。"""
+    allowed, reason = mod.poll_decision(
+        env_enabled=True, active_broker="tdx", has_open_orders=True
+    )
+    assert allowed is True and "open QMT orders" in reason
+
+
+def test_poll_decision_env_kill_switch():
+    allowed, reason = mod.poll_decision(
+        env_enabled=False, active_broker="qmt_exec", has_open_orders=True
+    )
+    assert allowed is False and "QMT_EXEC_POLL_ENABLED" in reason
+
+
+def test_qmt_gate_relevant_only_for_active_broker_or_open_orders():
+    assert mod.qmt_gate_relevant(active_broker="qmt_exec", has_open_orders=False)
+    assert mod.qmt_gate_relevant(active_broker="tdx", has_open_orders=True)
+    assert not mod.qmt_gate_relevant(active_broker="tdx", has_open_orders=False)
+    assert not mod.qmt_gate_relevant(active_broker="", has_open_orders=False)
+
+
+def test_unhealthy_query_sets_backoff_and_success_resets():
+    poller = _make_poller(FakeClient())
+    poller._note_query_error(
+        "orders", mod.QmtExecError("channel hung", code="STRATEGY_UNHEALTHY")
+    )
+    assert poller._fail_streak == 1
+    assert poller._backoff_s == mod.BACKOFF_BASE_S
+    poller._note_query_error(
+        "orders", mod.QmtExecError("still hung", code="STRATEGY_UNHEALTHY")
+    )
+    assert poller._fail_streak == 2
+    assert poller._backoff_s == mod.BACKOFF_BASE_S * 2
+    # 成功一轮由 run 循环清零；这里直接验证清零后的退避
+    poller._fail_streak = 0
+    poller._backoff_s = 0.0
+    assert poller._next_sleep() >= poller._interval
+
+
+def test_throttled_query_counts_as_throttled_not_unhealthy():
+    poller = _make_poller(FakeClient())
+    poller._note_query_error(
+        "orders", mod.QmtExecError("trade rpc throttled", code="TRADE_RPC_THROTTLED")
+    )
+    assert poller.stats["throttled"] == 1
+    assert poller._backoff_s == mod.BACKOFF_BASE_S

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 METRICS_KEY = "qm:qmt:pipe:metrics"
 HEARTBEAT_KEY = "qm:qmt:pipe:heartbeat"
+STRATEGY_WATCHDOG_KEY = "qm:qmt:strategy:watchdog"
 UNVERIFIED_KEY = "qm:qmt:unverified:{account}"
 ORDER_EVENTS_KEY = "bigqmt:order_events:{account}"
 
@@ -40,6 +41,11 @@ DEFAULT_UNVERIFIED_STALE_S = 600.0
 DEFAULT_HARD_THRESHOLD = 2
 DEFAULT_HEARTBEAT_MAX_AGE_S = 45.0
 DEFAULT_UNVERIFIED_TTL_S = 7200
+#: 策略账户通道卡死超过该时长才告警（看门狗阈值 2 次 × 30s 探针 + 余量）。
+DEFAULT_STRATEGY_STUCK_S = 180.0
+#: 重启风暴：窗口内自动重启次数达到该值 → 自动重启已救不回来，告警人工介入。
+DEFAULT_RESTART_STORM_THRESHOLD = 4
+DEFAULT_RESTART_STORM_WINDOW_S = 1800.0
 
 _CN_TZ = timezone(timedelta(hours=8))
 
@@ -82,6 +88,69 @@ def evaluate_pipe_metrics(
     order_age = _f(metrics.get("order_age_s"), -1.0)
     if order_age_max_s > 0 and order_age > order_age_max_s:
         issues.append(f"委托回报停滞 {order_age:.0f}s（阈值 {order_age_max_s:.0f}s）")
+    return issues
+
+
+def evaluate_strategy_watchdog(
+    state: Mapping[str, object],
+    *,
+    now: float | None = None,
+    stuck_max_s: float = DEFAULT_STRATEGY_STUCK_S,
+    restart_storm_threshold: int = DEFAULT_RESTART_STORM_THRESHOLD,
+    restart_storm_window_s: float = DEFAULT_RESTART_STORM_WINDOW_S,
+    include_quote_push: bool = False,
+) -> list[str]:
+    """``qm:qmt:strategy:watchdog`` → 人话问题列表（纯函数）。
+
+    这是「QMT 在线·账户滞后」的**可观测面**：伴生桥指标里的 pos/asset age 只能
+    说明「数据旧了」，策略看门狗状态能直接说明「adjust 主线程卡死 / 自动重启风暴」。
+    盘外/刚重启的 ``unresponsive_since=0`` 不立刻告警，必须持续 ``stuck_max_s``。
+    """
+    if not state:
+        return []
+    now = time.time() if now is None else float(now)
+    issues: list[str] = []
+
+    raw_ok = state.get("account_ok")
+    if isinstance(raw_ok, str):
+        account_ok = raw_ok.strip().lower() in {"1", "true", "yes", "ok"}
+    else:
+        account_ok = bool(raw_ok)
+    action = str(state.get("action") or "").strip().lower()
+    since = _f(state.get("unresponsive_since"), 0.0)
+    if not account_ok and (since > 0 or action in {"alert", "restart_bridge", "reload"}):
+        stuck = now - since if since > 0 else 0.0
+        if since <= 0 or stuck >= max(1.0, float(stuck_max_s)):
+            span = f"{stuck:.0f}s" if since > 0 else "起点未知"
+            issues.append(
+                f"交易查询通道卡死（{span}）：get_asset/query_orders 不响应，"
+                "ping 与行情仍正常"
+            )
+
+    if include_quote_push and str(
+        state.get("quote_push_ready") or ""
+    ).strip().lower() in {"0", "false", "no", "off"}:
+        # 默认**不**把「全推未装配」算作故障：本项目行情主源是 TDX，QMT 全推
+        # 只是备源；Tap 常在 QMT 策略里被有意关闭。把它放进硬告警列表会让
+        # tracker 永不恢复、每 30 分钟推一次，真实故障被淹没。需要时用
+        # QM_QMT_ALERT_TAP_DISABLED=true 打开。
+        issues.append("全推行情订阅未装配（Tap disabled）：行情靠 sweep 轮询兜底")
+
+    stamps: list[float] = []
+    for item in str(state.get("bridge_restart_ts") or "").split(","):
+        try:
+            ts = float(str(item).strip())
+        except (TypeError, ValueError):
+            continue
+        if ts > 0:
+            stamps.append(ts)
+    recent = [ts for ts in stamps if now - ts < float(restart_storm_window_s)]
+    if len(recent) >= max(1, int(restart_storm_threshold)):
+        issues.append(
+            f"伴生桥重启风暴：{len(recent)} 次/"
+            f"{float(restart_storm_window_s) / 60.0:.0f} 分钟；自动重启已停止，"
+            "请在 QMT 策略编辑器里停止→运行策略"
+        )
     return issues
 
 
@@ -325,6 +394,34 @@ async def _redis_url_db5() -> str:
     return url
 
 
+async def _qmt_alerts_relevant() -> bool:
+    """QMT 卡死/重启风暴是否值得**推送**（QMT 正在交易或有未平单）。
+
+    QMT 不是当前券商且没有遗留未平单时，QMT 主线程卡死不影响交易与行情
+    （行情主源 TDX），推送只会变成 7×24 噪音；状态仍可在
+    ``/api/v1/qmt/health`` 与 ``qm:qmt:strategy:watchdog`` 查看。
+    读不到按**相关**处理：宁多报一次，不漏报真正影响交易的故障。
+    """
+    try:
+        from backend.services.live_trading.services.qmt_exec_poller import (
+            active_broker_name,
+            has_open_qmt_orders,
+            qmt_gate_relevant,
+        )
+
+        broker = active_broker_name()
+        open_orders = (
+            True if broker.strip().lower() == "qmt_exec"
+            else await has_open_qmt_orders()
+        )
+        return qmt_gate_relevant(
+            active_broker=broker, has_open_orders=open_orders
+        )
+    except Exception as exc:  # noqa: BLE001 - 读不到按相关处理
+        logger.warning("[QmtPipeGuard] QMT 告警相关性检查失败（按相关处理）: %s", exc)
+        return True
+
+
 async def run_qmt_pipe_guard_task(interval_seconds: float | None = None) -> None:
     """常驻任务：每 ``interval_seconds`` 采一次指标 + 核对超时委托。"""
     import redis.asyncio as aioredis
@@ -337,9 +434,27 @@ async def run_qmt_pipe_guard_task(interval_seconds: float | None = None) -> None
     order_age_max = float(
         os.getenv("QM_QMT_PIPE_ORDER_AGE_MAX", DEFAULT_ORDER_AGE_MAX_S)
     )
+    strategy_stuck_max = float(
+        os.getenv("QM_QMT_STRATEGY_STUCK_MAX", DEFAULT_STRATEGY_STUCK_S)
+    )
+    restart_storm_threshold = int(
+        os.getenv(
+            "QM_QMT_RESTART_STORM_THRESHOLD", DEFAULT_RESTART_STORM_THRESHOLD
+        )
+    )
+    restart_storm_window = float(
+        os.getenv(
+            "QM_QMT_RESTART_STORM_WINDOW", DEFAULT_RESTART_STORM_WINDOW_S
+        )
+    )
     stale_after = float(
         os.getenv("QM_QMT_UNVERIFIED_STALE", DEFAULT_UNVERIFIED_STALE_S)
     )
+    alert_tap_disabled = str(
+        os.getenv("QM_QMT_ALERT_TAP_DISABLED", "false") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    qmt_relevant = True
+    qmt_relevant_at = 0.0
     account = str(os.getenv("QMT_EXEC_ACCOUNT_ID", "") or "").strip()
     if not account:
         # 生产环境账号来自页面配置 broker:config:qmt_exec（容器 env 通常不配）
@@ -369,12 +484,28 @@ async def run_qmt_pipe_guard_task(interval_seconds: float | None = None) -> None
                 )
             metrics = await redis_client.hgetall(METRICS_KEY)
             heartbeat = await redis_client.get(HEARTBEAT_KEY)
+            watchdog = await redis_client.hgetall(STRATEGY_WATCHDOG_KEY)
+            loop_now = asyncio.get_running_loop().time()
+            if loop_now - qmt_relevant_at >= 30.0:
+                qmt_relevant_at = loop_now
+                qmt_relevant = await _qmt_alerts_relevant()
+            watchdog_issues = (
+                evaluate_strategy_watchdog(
+                    watchdog or {},
+                    stuck_max_s=strategy_stuck_max,
+                    restart_storm_threshold=restart_storm_threshold,
+                    restart_storm_window_s=restart_storm_window,
+                    include_quote_push=alert_tap_disabled,
+                )
+                if qmt_relevant
+                else []
+            )
             issues = evaluate_pipe_heartbeat(heartbeat) + evaluate_pipe_metrics(
                 metrics or {},
                 queue_max=queue_max,
                 pos_age_max_s=pos_age_max,
                 order_age_max_s=order_age_max,
-            )
+            ) + watchdog_issues
             event = tracker.feed(issues)
             if event is not None:
                 await _notify(event, account=account)

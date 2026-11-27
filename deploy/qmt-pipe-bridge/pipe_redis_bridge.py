@@ -95,6 +95,12 @@ from bigqmt_signal_trader.redis_rpc import decode_rpc_request_payload  # noqa: E
 import bridge_gates  # noqa: E402
 import bridge_account_state as account_state  # noqa: E402
 import bridge_order_intent as order_intent  # noqa: E402
+import bridge_stability as stability  # noqa: E402
+
+try:  # 今日行情缓存（V1）；包缺失/导入失败时桥照常运行
+    from qmt_today_cache.wire import build_service as build_today_cache  # noqa: E402
+except Exception:  # noqa: BLE001
+    build_today_cache = None
 
 CONFIG_PATH = os.path.join(BASE, 'bridge_config.json')
 LOG_PATH = os.path.join(BASE, '..', 'logs', 'pipe_bridge.log')
@@ -116,7 +122,15 @@ DEFAULT_CONFIG = {
             # 容量 3：手动「测试连接」要连发 ping+asset+positions，容量 1 会被
             # 后台轮询抢光令牌（2026-11-06 用户现场）。持续速率不变。
             'trade_min_interval_s': 3.0, 'trade_burst': 3,
-            'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 6},
+            'internal_trade_min_interval_s': 2.0, 'internal_trade_burst': 6,
+            # 交易只读查询的短超时：单线程 rpc_worker 在等一条挂死查询时，
+            # 后面的订单只能排队。只读查询不需要 15s（订单/撤单仍用全局超时）。
+            'trade_read_timeout_s': 8.0,
+            # 交易只读短缓存：同一事实在 TTL 内只打一次主线程。资产/持仓可稍长，
+            # 委托/成交必须更短（订单状态变化要尽快可见）；订单/撤单不缓存。
+            'trade_read_cache_enabled': True,
+            'trade_read_cache_ttl_s': 1.0,
+            'trade_read_asset_ttl_s': 2.0},
     # 启动错峰：2026-11-06 三次实测「桥一启动，策略 40-60s 内必挂」——五个
     # worker 零延迟同时开跑，瞬间并发打到 QMT 单线程交易 API。错峰后同一时刻
     # 只有一个 worker 热身。
@@ -156,7 +170,12 @@ DEFAULT_CONFIG = {
                'interval_s': 5, 'ttl_s': 30,
                # 交易查询通道探针（见 strategy_health_worker）：get_asset 走
                # adjust 主线程，连续失败即判 unresponsive 并开始退避。
-               'account_probe_s': 30, 'account_probe_timeout_s': 6},
+               'account_probe_s': 30, 'account_probe_timeout_s': 6,
+               # 自适应调速：EWMA 延迟超过 slow_ms 就把交易查询间隔翻倍，
+               # 失败再翻倍（封顶 max_multiplier）；主线程恢复后连续 recover_ok
+               # 次健康才逐级减半。见 bridge_stability.observe。
+               'slow_ms': 1200, 'very_slow_ms': 3000,
+               'ewma_alpha': 0.25, 'max_multiplier': 8, 'recover_ok': 3},
     'tap': {'enabled': True, 'interval_s': 0.5, 'subscribe_refresh_s': 60,
             'max_symbols': 250, 'respect_budget': False,
             # 全市场推送：指向 Redis 集合（成员为后缀式代码）即把订阅扩到全市场，
@@ -173,6 +192,40 @@ DEFAULT_CONFIG = {
     'sweep': {'enabled': True, 'interval_s': 300, 'chunk': 500, 'ttl_s': 360,
               'universe_key': '', 'max_symbols': 6000,
               'start_hhmm': 930, 'end_hhmm': 1500},
+    # 今日行情缓存（V1：最新快照 + 当天 1m；Parquet part + manifest）。
+    # 默认开启但全部调用都有 try/except：缓存失败只降级，不影响行情/订单。
+    # dir 相对 pipe_redis_bridge.py 的目录（默认 qmt-tools/data/cache/qmt）。
+    'today_cache': {
+        'enabled': True,
+        'dir': '../data/cache/qmt',
+        'snapshot_interval_s': 3.0,
+        'chunk': 1000,
+        'universe_key': '',
+        'sector_name': '沪深A股',
+        'max_symbols': 6000,
+        'max_age_s': 5.0,
+        'part_interval_s': 300.0,
+        'part_max_rows': 200000,
+        'bar1m_retention_days': 30,
+        'write_queue_max': 200,
+        'compress': 'zstd',
+        'spool_fallback': True,
+        'memory_limit_mb': 300,
+        'disk_min_free_gb': 5.0,
+        'session_only': True,
+        'startup_grace_s': 8.0,
+        'max_bars_per_symbol': 320,
+        'query_max_symbols': 600,
+        'hot_enabled': True,
+        'hot_max_symbols': 800,
+        'hot_tick_max_per_symbol': 1200,
+        'hot_tick_min_interval_s': 1.0,
+        'hot_tick_stale_s': 20.0,
+        'hot_query_max_symbols': 800,
+        'hot_tick_retention_days': 10,
+        'snapshot3s_enabled': True,
+        'snapshot3s_retention_days': 5,
+    },
     'source_http': {'enabled': True, 'host': '127.0.0.1', 'port': 17720,
                     'stale_after_s': 30, 'allow_orders': False},
 }
@@ -289,6 +342,8 @@ class State(object):
         self.queue_trade_ts = 0.0
         self.internal_trade_tokens = 4.0
         self.internal_trade_ts = 0.0
+        # 自适应交易查询调速（bridge_stability.GovernorState，不可变整体替换）。
+        self.governor = stability.GovernorState()
 
     def note_error(self, where, exc):
         with self.lock:
@@ -297,6 +352,47 @@ class State(object):
 
 
 STATE = State()
+#: 交易只读短缓存（线程安全；只由 rpc_worker 读写）。
+TRADE_CACHE = stability.TradeReadCache()
+#: 今日行情缓存（None=未启用/启动失败，桥按原逻辑透传）。
+TODAY_CACHE = None
+
+
+def _governor_cfg():
+    """CFG → GovernorConfig（热加载：每轮读当前配置）。"""
+    return stability.GovernorConfig(
+        slow_ms=float(CFG.get('health.slow_ms') or 1200),
+        very_slow_ms=float(CFG.get('health.very_slow_ms') or 3000),
+        alpha=float(CFG.get('health.ewma_alpha') or 0.25),
+        max_multiplier=float(CFG.get('health.max_multiplier') or 8),
+        recover_ok=int(CFG.get('health.recover_ok') or 3),
+    )
+
+
+def observe_trade_rpc(method, latency_ms, ok):
+    """记录一次交易查询的延迟/失败，更新调速状态（非交易类忽略）。"""
+    if not (bridge_gates.is_trade_context(method)
+            and not bridge_gates.is_order_like(method)):
+        return
+    cfg = _governor_cfg()
+    with STATE.lock:
+        STATE.governor = stability.observe(
+            STATE.governor, latency_ms, bool(ok), cfg)
+
+
+def trade_interval(base_s):
+    """基础交易查询间隔 × Governor 倍率。"""
+    with STATE.lock:
+        governor = STATE.governor
+    return stability.effective_interval(base_s, governor, _governor_cfg())
+
+
+def _cfg_bool(path, default=True):
+    """配置布尔值（兼容 JSON true/false 与字符串 '0'/'false'/'off'）。"""
+    raw = CFG.get(path, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() not in ('', '0', 'false', 'no', 'off')
 
 
 def connect_redis():
@@ -333,12 +429,14 @@ def rpc(method, params=None, timeout=None):
     t0 = time.perf_counter()
     try:
         resp = TR.send_request(req, timeout_seconds=float(timeout or CFG.get('rpc.timeout_s') or 15))
-    finally:
-        pass
+    except Exception:
+        observe_trade_rpc(method, (time.perf_counter() - t0) * 1000.0, False)
+        raise
     ms = (time.perf_counter() - t0) * 1000.0
     with STATE.lock:
         STATE.rpc_calls += 1
         STATE.last_rpc_ms = ms
+    observe_trade_rpc(method, ms, True)
     if not isinstance(resp, dict):
         raise RuntimeError('bad response type: %r' % (type(resp),))
     if not resp.get('ok', False):
@@ -398,7 +496,8 @@ def market_call(method, params=None, timeout=None, est_ms=200.0,
         raise RuntimeError('strategy unhealthy, skipped')
     if (throttle and bridge_gates.is_trade_context(method)
             and not bridge_gates.is_order_like(method)):
-        interval = float(CFG.get('rpc.internal_trade_min_interval_s') or 0)
+        interval = trade_interval(
+            float(CFG.get('rpc.internal_trade_min_interval_s') or 0))
         capacity = int(CFG.get('rpc.internal_trade_burst') or 6)
         with STATE.lock:
             ok, STATE.internal_trade_tokens, STATE.internal_trade_ts = (
@@ -795,6 +894,21 @@ def rpc_worker():
                 except Exception as exc:
                     STATE.note_error('rpc.reply', exc)
                 continue
+            # 今日行情缓存：只处理 get_full_tick / cache_today_1m / cache_status；
+            # 订单类永远不经过缓存（下订单分支保留原语义）。命中直接回包，
+            # 未命中返回 None 继续走原有管道。
+            if TODAY_CACHE is not None and not is_order_method(method):
+                try:
+                    cache_resp = TODAY_CACHE.try_handle_rpc(method, req)
+                except Exception as exc:  # noqa: BLE001 - 缓存失败只回落
+                    STATE.note_error('rpc.cache', exc)
+                    cache_resp = None
+                if cache_resp is not None:
+                    try:
+                        write_reply(req, cache_resp)
+                    except Exception as exc:  # noqa: BLE001
+                        STATE.note_error('rpc.reply', exc)
+                    continue
             if is_order_method(method):
                 busy = order_backlog_gate(
                     rpc_backlog(), CFG.get('budget.order_preempt_queue') or 0)
@@ -820,12 +934,41 @@ def rpc_worker():
                     except Exception as exc:
                         STATE.note_error('rpc.reply', exc)
                     continue
+            # 交易只读短缓存：同一事实在 TTL 内只打一次主线程。
+            # 放在限速之前——缓存命中不该消耗令牌；订单/撤单永不进缓存。
+            cache_ttl = 0.0
+            cache_params = req.get('params') or {}
+            if (stability.is_cacheable_trade_read(method)
+                    and not bridge_gates.is_order_like(method)
+                    and _cfg_bool('rpc.trade_read_cache_enabled', True)):
+                default_ttl = float(CFG.get('rpc.trade_read_cache_ttl_s') or 1.0)
+                cache_ttl = stability.trade_read_ttl(method, default_ttl)
+                if bridge_gates.canonical_method(method) in (
+                        'get_asset', 'get_positions'):
+                    cache_ttl = float(
+                        CFG.get('rpc.trade_read_asset_ttl_s') or cache_ttl)
+                hit, cached = TRADE_CACHE.get(method, cache_params)
+                if hit:
+                    # 缓存的响应带的是**首个请求**的 request_id；命中时改回当前
+                    # 请求的 id，调用方按 request_id 配对，绝不能串号。
+                    try:
+                        cached = dict(cached)
+                        cached['request_id'] = req.get('request_id')
+                    except Exception:  # noqa: BLE001 - 非 dict 缓存按未命中处理
+                        hit = False
+                if hit:
+                    try:
+                        write_reply(req, cached)
+                    except Exception as exc:  # noqa: BLE001
+                        STATE.note_error('rpc.reply', exc)
+                    continue
             # 交易类请求限速：只限交易上下文方法，订单/撤单/行情一律不受影响。
             # QMT 的 get_trade_detail_data 连续查询会长时间阻塞，令牌桶把持续速率
             # 压到 rpc.trade_min_interval_s 一条，容器请求桶容量 1。
             if (bridge_gates.is_trade_context(method)
                     and not bridge_gates.is_order_like(method)):
-                interval = float(CFG.get('rpc.trade_min_interval_s') or 0)
+                interval = trade_interval(
+                    float(CFG.get('rpc.trade_min_interval_s') or 0))
                 capacity = int(CFG.get('rpc.trade_burst') or 1)
                 with STATE.lock:
                     ok, STATE.queue_trade_tokens, STATE.queue_trade_ts = (
@@ -851,6 +994,8 @@ def rpc_worker():
                 continue
             if is_order_method(method):
                 # 订单唯一出口：原子幂等 + inflight + 未知不可重试。
+                # 先清只读缓存：订单/撤单之后委托与资产事实必须重新读。
+                TRADE_CACHE.invalidate()
                 try:
                     resp, remove = _send_order_intent(
                         req, raw=payload, reply_fn=write_reply)
@@ -871,8 +1016,18 @@ def rpc_worker():
                 keep_processing = not remove
                 continue
             try:
-                resp = TR.send_request(
-                    req, timeout_seconds=float(CFG.get('rpc.timeout_s') or 15))
+                # 交易只读查询用更短超时：它挂在单线程 rpc_worker 里时，后面的
+                # 订单也在排队。8s 足够正常查询，挂死时把订单头阻塞压到最小。
+                req_timeout = float(CFG.get('rpc.timeout_s') or 15)
+                if (stability.is_cacheable_trade_read(method)
+                        and not bridge_gates.is_order_like(method)):
+                    req_timeout = float(
+                        CFG.get('rpc.trade_read_timeout_s') or req_timeout)
+                resp = TR.send_request(req, timeout_seconds=req_timeout)
+                if (cache_ttl > 0 and isinstance(resp, dict)
+                        and resp.get('ok')):
+                    TRADE_CACHE.put(
+                        method, cache_params, resp, ttl_s=cache_ttl)
             except Exception as exc:
                 resp = {'request_id': req.get('request_id'), 'ok': False,
                         'error': '%s: %s' % (type(exc).__name__, exc)}
@@ -1312,6 +1467,10 @@ def write_snapshot(code, tick):
     pipe = R.pipeline()
     pipe.hset('market:snapshot:%s' % code, mapping=mapping)
     pipe.expire('market:snapshot:%s' % code, int(CFG.get('quotes.stale_after_s') or 10))
+    # 来源键（V3）：canonical 之外再写一份 qmt 专用键，供统一行情合并/交叉校验。
+    source_key = 'market:snapshot:qmt:%s' % code
+    pipe.hset(source_key, mapping=mapping)
+    pipe.expire(source_key, int(CFG.get('quotes.stale_after_s') or 10))
     pipe.execute()
     with STATE.lock:
         STATE.quote_ts[code] = ts
@@ -1364,6 +1523,9 @@ def write_snapshots_bulk(ticks, chunk=500, ttl_override=0):
             key = 'market:snapshot:%s' % code
             pipe.hset(key, mapping=mapping)
             pipe.expire(key, ttl)
+            source_key = 'market:snapshot:qmt:%s' % code
+            pipe.hset(source_key, mapping=mapping)
+            pipe.expire(source_key, ttl)
             if day_key:
                 # 当日快照：整条 mapping 落 JSON，消费方按需取字段。
                 pipe.hset(day_key, code, json.dumps(mapping, ensure_ascii=False))
@@ -1410,6 +1572,58 @@ def sweep_universe():
     return sorted(set(codes))[:limit]
 
 
+#: 今日缓存的全市场宇宙（30 分钟刷新一次；取不到就退回 sweep 热集）。
+_CACHE_UNIVERSE_TS = 0.0
+_CACHE_UNIVERSE_CODES: list[str] = []
+
+
+def _cache_fetcher(codes):
+    """缓存采集线程的取数函数：只读 get_full_tick，走与 sweep 相同的管道。
+
+    队列里有容器请求时让路（不抢订单/交易查询），本轮到下一轮再补。
+    """
+    if rpc_backlog() >= int(CFG.get('budget.rpc_preempt_queue') or 1):
+        return {}
+    return rpc('get_full_tick', {'codes': list(codes)}, timeout=15)
+
+
+def _cache_universe():
+    """全市场代码域：today_cache.universe_key → QMT 沪深A股 → sweep 热集。
+
+    30 分钟内复用；QMT 策略未起来时自动退回热集，不让采集线程空转报错。
+    """
+    global _CACHE_UNIVERSE_TS, _CACHE_UNIVERSE_CODES
+    now = time.time()
+    if _CACHE_UNIVERSE_CODES and now - _CACHE_UNIVERSE_TS < 1800:
+        return list(_CACHE_UNIVERSE_CODES)
+    codes: list[str] = []
+    key = str(CFG.get('today_cache.universe_key') or '')
+    if key:
+        try:
+            codes = [_as_text(c) for c in (R.smembers(key) or set())]
+        except Exception as exc:  # noqa: BLE001
+            STATE.note_error('today_cache.universe', exc)
+    if not codes:
+        try:
+            sector = str(CFG.get('today_cache.sector_name') or '沪深A股')
+            data = rpc('get_stock_list_in_sector', {'sector_name': sector}, timeout=30)
+            if isinstance(data, (list, tuple)):
+                codes = [_as_text(c) for c in data]
+        except Exception as exc:  # noqa: BLE001 - 策略未起时退回热集
+            STATE.note_error('today_cache.sector', exc)
+    if not codes:
+        codes = sweep_universe()
+    limit = int(CFG.get('today_cache.max_symbols') or 6000)
+    normalized = sorted(
+        {str(c).strip().upper() for c in codes if isinstance(c, str) and '.' in c}
+    )[:limit]
+    _CACHE_UNIVERSE_TS = now
+    _CACHE_UNIVERSE_CODES = normalized
+    if normalized:
+        log('today_cache universe=%d' % len(normalized))
+    return list(normalized)
+
+
 def sweep_worker():
     log('sweep worker start')
     _startup_delay(5)
@@ -1435,6 +1649,8 @@ def sweep_worker():
                 STATE.note_error('sweep', exc)
                 continue
             if isinstance(data, dict):
+                if TODAY_CACHE is not None:
+                    TODAY_CACHE.ingest_ticks(data, source='qmt_sweep')
                 written += write_snapshots_bulk(data, chunk=500, ttl_override=ttl)
             time.sleep(0.05)
         with STATE.lock:
@@ -1450,6 +1666,9 @@ def poll_quotes(symbols):
     data = market_call('get_full_tick', {'codes': list(symbols)},
                        est_ms=100 + 4 * len(symbols))
     if isinstance(data, dict):
+        if TODAY_CACHE is not None:
+            TODAY_CACHE.ingest_ticks(data, source='qmt_quotes')
+            TODAY_CACHE.ingest_hot_ticks(data, source='qmt_quotes')
         for code, tick in data.items():
             write_snapshot(code, tick)
 
@@ -1678,6 +1897,12 @@ def _metrics_snapshot():
     now = time.time()
     # Redis I/O 放在 STATE.lock 外面：Redis 卡住时不能连持仓线程一起堵。
     processing_len, inflight_orders, unknown_orders = _inflight_counts()
+    today_cache_stats = {}
+    if TODAY_CACHE is not None:
+        try:
+            today_cache_stats = TODAY_CACHE.status()
+        except Exception as exc:  # noqa: BLE001 - 指标失败不影响健康上报
+            today_cache_stats = {'errors': 1, 'last_error': repr(exc)}
     with STATE.lock:
         positions_age = (round(now - STATE.last_pos_age, 1)
                          if STATE.last_pos_age else -1)
@@ -1692,6 +1917,7 @@ def _metrics_snapshot():
             STATE.last_pos_age, now,
             CFG.get('source_http.stale_after_s') or 30,
         )
+        cache_stats = TRADE_CACHE.stats()
         return {
             'state': 'ok',
             'account_id': str(CFG.get('account_id')),
@@ -1730,6 +1956,55 @@ def _metrics_snapshot():
             'account_probe_ok_age_s': (
                 round(now - STATE.account_probe_ok_ts, 1)
                 if STATE.account_probe_ok_ts else -1),
+            # 自适应调速 + 交易只读缓存：出问题时先看 multiplier 是否已升、
+            # 缓存是否真的在削峰（hits/misses）。
+            'governor_multiplier': round(float(STATE.governor.multiplier or 1.0), 2),
+            'governor_ewma_ms': round(float(STATE.governor.ewma_ms or 0.0), 1),
+            'governor_timeouts': int(STATE.governor.timeouts or 0),
+            'trade_cache_hits': int(cache_stats.get('hits') or 0),
+            'trade_cache_misses': int(cache_stats.get('misses') or 0),
+            'trade_cache_entries': int(cache_stats.get('entries') or 0),
+            # 今日行情缓存（V1）：enabled/degraded + 命中 + 落盘队列/parts。
+            'cache_enabled': int(bool(today_cache_stats.get('enabled'))),
+            'cache_degraded': int(bool(today_cache_stats.get('degraded'))),
+            'cache_hits': int(today_cache_stats.get('hits') or 0),
+            'cache_misses': int(today_cache_stats.get('misses') or 0),
+            'cache_stale': int(today_cache_stats.get('stale') or 0),
+            'cache_queries': int(today_cache_stats.get('queries') or 0),
+            'cache_ingest_ticks': int(today_cache_stats.get('ingest_ticks') or 0),
+            'cache_finalized_bars': int(today_cache_stats.get('finalized_bars') or 0),
+            'cache_latest_symbols': int(today_cache_stats.get('latest_symbols') or 0),
+            'cache_bar_symbols': int(today_cache_stats.get('bar_symbols') or 0),
+            'cache_completed_bars': int(today_cache_stats.get('completed_bars') or 0),
+            'cache_queue': int(today_cache_stats.get('queue') or 0),
+            'cache_dropped': int(today_cache_stats.get('dropped') or 0),
+            'cache_parts': int(today_cache_stats.get('parts') or 0),
+            'cache_bytes': int(today_cache_stats.get('bytes') or 0),
+            'cache_last_flush_age_s': float(
+                today_cache_stats.get('last_flush_age_s') or -1
+            ),
+            'cache_last_ingest_age_s': float(
+                today_cache_stats.get('last_ingest_age_s') or -1
+            ),
+            'cache_errors': int(today_cache_stats.get('errors') or 0),
+            'cache_hot_symbols': int(today_cache_stats.get('hot_symbols') or 0),
+            'cache_hot_ticks': int(today_cache_stats.get('hot_ticks') or 0),
+            'cache_hot_stale_symbols': int(
+                today_cache_stats.get('hot_stale_symbols') or 0
+            ),
+            'cache_hot_ingest_ticks': int(
+                today_cache_stats.get('hot_ingest_ticks') or 0
+            ),
+            'cache_hot_queries': int(today_cache_stats.get('hot_queries') or 0),
+            'cache_snapshot3s_rows': int(
+                today_cache_stats.get('snapshot3s_rows') or 0
+            ),
+            'cache_snapshot3s_rounds': int(
+                today_cache_stats.get('snapshot3s_rounds') or 0
+            ),
+            'cache_snapshot3s_age_s': float(
+                today_cache_stats.get('last_snapshot3s_age_s') or -1
+            ),
             'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         }
 
@@ -2183,6 +2458,7 @@ def _remove_pid_file() -> None:
 
 
 def main():
+    global TODAY_CACHE
     log('pipe bridge v2 starting account=%s pipe=%s' %
         (CFG.get('account_id'), CFG.get('pipe.name')))
     _write_pid_file()
@@ -2191,6 +2467,19 @@ def main():
         recover_processing()
     except Exception as exc:  # noqa: BLE001 - 恢复失败不能拦住桥启动
         log('recover_processing failed: %r' % (exc,))
+    if build_today_cache is not None:
+        try:
+            TODAY_CACHE = build_today_cache(
+                CFG.get,
+                BASE,
+                _cache_fetcher,
+                _cache_universe,
+                session_provider=None,
+                logger=log,
+            )
+        except Exception as exc:  # noqa: BLE001 - 缓存启动失败只降级
+            TODAY_CACHE = None
+            log('today_cache start failed: %r' % (exc,))
     threads = [
         threading.Thread(target=watchdog_config_loop, daemon=True, name='cfg'),
         threading.Thread(target=rpc_worker, daemon=True, name='rpc'),
@@ -2212,6 +2501,11 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         STATE.stop.set()
+        if TODAY_CACHE is not None:
+            try:
+                TODAY_CACHE.stop()
+            except Exception as exc:  # noqa: BLE001
+                log('today_cache stop failed: %r' % (exc,))
         _remove_pid_file()
         log('stopping by KeyboardInterrupt')
 

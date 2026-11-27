@@ -240,6 +240,11 @@ def _snapshot_key(prefix: str) -> str:
     return f"market:snapshot:{prefix.lower()}"
 
 
+def _snapshot_source_key(prefix: str) -> str:
+    """来源键（V3）：canonical 之外再写一份 tdx 专用键，供统一行情合并/交叉校验。"""
+    return f"market:snapshot:tdx:{prefix.lower()}"
+
+
 async def _pull_positions() -> list[dict]:
     """拉取持仓（仅 volume>0 的）。优先桥实时，失败回退 PG 最近快照。
 
@@ -342,6 +347,14 @@ async def _write_snapshot(prefix: str, snap: dict) -> bool:
                 },
             )
             pipe.expire(_snapshot_key(prefix), SNAPSHOT_TTL)
+            pipe.hset(
+                _snapshot_source_key(prefix),
+                mapping={
+                    **snap,
+                    "source": "tdx_bridge",
+                },
+            )
+            pipe.expire(_snapshot_source_key(prefix), SNAPSHOT_TTL)
             pipe.zadd(
                 _series_key(prefix), {json.dumps(payload, ensure_ascii=False): ts}
             )

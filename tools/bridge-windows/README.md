@@ -211,6 +211,10 @@ bridge-windows\
 
 - **升级代码**：只更新 `src/`、`scripts/`、`main.py`、`watchdog.ps1`、`ui.html`；
   **不要整文件覆盖 `config.yaml`**（桥在 token 缺失时会自动生成新 token，平台会立刻 401）。
+- **一键启动**：`启动交易台.cmd`（或 ASCII 别名 `start_trading_desk.cmd`）现在会先跑 TDX 交易台
+  （TQ 17709 / 桥 8550 / 看门狗 / 采集器 8560 / 同花顺 8765），再启动 QMT 伴生桥 17720，
+  最后跑 `qmt-tools\cache_quality_check.py` 质检缓存与关键参数；QMT 已在健康运行时不重启（`NOOP`），
+  `-Restart` 会同时强制重启 TDX 与 QMT；自动化用 `-NoPause -NoUi`，跳过质检用 `-NoCacheCheck`。
 - **重启**：`.\scripts\launcher.ps1 -Restart`（缺谁起谁；`-NoThs` 跳过同花顺）。
 - **日志**：`data\logs\`；缓存库损坏会自愈（隔离重建 + 日清）。
 - **卸载**：停止并删除三个计划任务，删除本目录即可（`data/` 一并删除）。

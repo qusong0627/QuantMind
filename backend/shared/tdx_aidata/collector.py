@@ -170,6 +170,7 @@ def frame_to_redis(record: dict, now: datetime) -> dict[str, Any] | None:
         "prefix": prefix,
         "series_key": f"market:series:{prefix}",
         "snapshot_key": f"market:snapshot:{prefix.lower()}",
+        "snapshot_source_key": f"market:snapshot:tdx:{prefix.lower()}",
         "snapshot_fields": snapshot_fields,
         "series_payload": series_payload,
         "ts": ts,
@@ -478,6 +479,11 @@ class SubscriptionEngine:
                 for _record, mapped in mapped_records:
                     pipe.hset(mapped["snapshot_key"], mapping=mapped["snapshot_fields"])
                     pipe.expire(mapped["snapshot_key"], SNAPSHOT_TTL)
+                    pipe.hset(
+                        mapped["snapshot_source_key"],
+                        mapping=mapped["snapshot_fields"],
+                    )
+                    pipe.expire(mapped["snapshot_source_key"], SNAPSHOT_TTL)
                     pipe.zadd(
                         mapped["series_key"],
                         {

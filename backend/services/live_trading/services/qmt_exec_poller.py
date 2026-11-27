@@ -18,12 +18,17 @@
 * **日切**：QMT 每日重置委托编号，跨自然日清空去重缓存。
 * **异常隔离**：单轮失败只记日志，不退出循环；未启用/未配置时低频空转，
   不给桥 Redis 与数据库添压力。
+* **活跃券商门控（2026-11-27 加固）**：QMT 不是当前 A 股交易券商且没有未平
+  QMT 委托时完全空转（60s 一轮），不再每 5s 向 QMT 的 adjust 主线程发
+  ``query_orders``；有遗留未平单时仍低频对账。桥不健康（STRATEGY_UNHEALTHY /
+  THROTTLED / BRIDGE_BUSY）时指数退避 5s→120s。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -52,6 +57,120 @@ POLL_INTERVAL_SECONDS = 5.0  # 交易时段轮询间隔（桥的容器交易查�
 OFF_HOURS_SLEEP_SECONDS = 30.0  # 非交易时段（只需低频确认开盘）
 DISABLED_SLEEP_SECONDS = 60.0  # 未启用/未配置时空转间隔
 SETTINGS_REFRESH_SECONDS = 30.0  # 页面配置重读间隔
+#: 券商选择/未平 QMT 单的检查间隔：不是每 5s 都查库/Redis。
+BROKER_CHECK_SECONDS = 30.0
+#: 非活跃券商时的空转间隔：QMT 有未平单时仍按这个节奏低频对账。
+IDLE_POLL_SECONDS = 60.0
+#: 查询失败/限速时的指数退避：5s → 10s → … → 120s，避免把已经挂死的主线程
+#: 继续打（2026-11-27：修复前固定 5s，2.5 小时累计 283 次失败）。
+BACKOFF_BASE_S = 5.0
+BACKOFF_MAX_S = 120.0
+
+#: 查询失败里属于「桥/主线程不健康」的错误码：命中就退避，不再按 5s 硬打。
+_TRADE_UNHEALTHY_CODES = frozenset(
+    {
+        "STRATEGY_UNHEALTHY",
+        "BRIDGE_BUSY",
+        "BRIDGE_UNREACHABLE",
+        "RPC_ERROR",
+        "TIMEOUT",
+    }
+)
+
+
+def next_backoff_s(fail_streak: int, *, base: float = BACKOFF_BASE_S,
+                   max_s: float = BACKOFF_MAX_S) -> float:
+    """连续失败次数 → 下一次等待秒数（纯函数，指数退避封顶）。"""
+    streak = max(0, int(fail_streak))
+    if streak <= 0:
+        return 0.0
+    return min(float(max_s), float(base) * (2 ** (streak - 1)))
+
+
+def poll_decision(
+    *, env_enabled: bool, active_broker: str, has_open_orders: bool
+) -> tuple[bool, str]:
+    """是否该轮询 QMT 委托/成交（纯函数）。
+
+    * QMT 不是当前交易券商时**默认空转**——QMT 无下单权，轮询只会给 QMT 的
+      adjust 主线程加交易查询负载（2026-11-27：这是「QMT 在线·账户滞后」反复
+      出现的主要压力源之一）；
+    * 但只要有**未平 QMT 委托**，仍按低频对账：券商切换后遗留单不能失联；
+    * 环境开关 ``QMT_EXEC_POLL_ENABLED=false`` 一律关闭。
+    """
+    if not env_enabled:
+        return False, "disabled by QMT_EXEC_POLL_ENABLED"
+    broker = str(active_broker or "").strip().lower()
+    if broker == "qmt_exec":
+        return True, "qmt_exec is the active broker"
+    if has_open_orders:
+        return True, "idle reconcile: open QMT orders"
+    return False, "qmt_exec is not the active broker"
+
+
+def active_broker_name() -> str:
+    """当前 A 股实盘券商（``broker:selected:CN`` → settings 兜底）。"""
+    try:
+        from backend.shared.real_positions import active_broker_type
+
+        return str(active_broker_type() or "").strip()
+    except Exception as exc:  # noqa: BLE001 - 读不到按「非 QMT」处理
+        logger.warning("[QmtExecPoller] 读取活跃券商失败: %s", exc)
+        return ""
+
+
+def qmt_gate_relevant(*, active_broker: str, has_open_orders: bool) -> bool:
+    """QMT 链路是否与当前交易相关（纯函数）。
+
+    QMT 不是当前券商且没有遗留未平单时，QMT 主线程卡死不影响交易与行情
+    （行情主源 TDX），不应再产生推送告警——否则 Tap 未装配、策略盘后停止
+    这类**非故障**状态会变成 7×24 每 30 分钟一次的告警噪音。QMT 状态仍可
+    在 ``/api/v1/qmt/health`` 与 ``qm:qmt:strategy:watchdog`` 里查看。
+    """
+    broker = str(active_broker or "").strip().lower()
+    return broker == "qmt_exec" or bool(has_open_orders)
+
+
+async def has_open_qmt_orders(*, lookback_days: int = 7) -> bool:
+    """本地是否还有未平 QMT 委托（券商切换后遗留单不能失联）。
+
+    读失败按 **True** 处理（继续对账/告警）：少一轮对账的代价可能是遗留单
+    永远不被回收，比多查几轮更糟。
+    """
+    try:
+        from sqlalchemy import text
+
+        from backend.services.trade.services.decision_round_core import (
+            ENV_ACCOUNT_USER,
+        )
+        from backend.shared.database_manager_v2 import get_session
+        from backend.shared.simulation_account_keys import resolve_db_account_user
+
+        user = resolve_db_account_user(ENV_ACCOUNT_USER)
+        async with get_session(read_only=True) as db:
+            row = (
+                await db.execute(
+                    text(
+                        """
+                        SELECT 1 FROM orders
+                        WHERE tenant_id = 'default' AND user_id = :uid
+                          AND broker = 'qmt_exec'
+                          AND status::text IN
+                              ('pending', 'submitted', 'partially_filled')
+                          AND created_at >= now() - make_interval(days => :days)
+                        LIMIT 1
+                        """
+                    ),
+                    {"uid": user, "days": int(lookback_days)},
+                )
+            ).first()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 - fail-safe：继续对账
+        logger.warning(
+            "[QmtExecPoller] 未平 QMT 委托检查失败（按有单处理继续对账）: %s", exc
+        )
+        return True
+
 # 每轮只发**一条**交易上下文查询：桥侧令牌桶 ``rpc.trade_min_interval_s`` 默认
 # 3s/条、容量 3，旧实现每 2s 连发 query_orders + query_trades，第二条必然
 # TRADE_RPC_THROTTLED；两条又在同一个 try 里，整轮被丢弃（orders 结果也丢）。
@@ -96,7 +215,18 @@ class QmtExecPoller:
             "unmatched": 0,
             "errors": 0,
             "throttled": 0,
+            "gate_skips": 0,
+            "backoff_skips": 0,
         }
+        # 活跃券商门控 + 失败退避（2026-11-27 加固）：QMT 不是当前交易券商时
+        # 不再每 5s 打 query_orders；桥不健康时指数退避，避免持续加压主线程。
+        self._fail_streak = 0
+        self._backoff_s = 0.0
+        self._gate_at = 0.0
+        self._poll_allowed = True
+        self._poll_reason = ""
+        self._has_open_orders = False
+        self._open_check_at = 0.0
 
     # -- 依赖 -----------------------------------------------------------
     @property
@@ -120,6 +250,51 @@ class QmtExecPoller:
             self._redis = None
         return self._redis
 
+    # -- 活跃券商门控（2026-11-27 加固） --------------------------------
+    @staticmethod
+    def _env_enabled() -> bool:
+        raw = str(os.getenv("QMT_EXEC_POLL_ENABLED", "true") or "").strip().lower()
+        return raw not in {"0", "false", "no", "off", "disabled"}
+
+    @staticmethod
+    def _active_broker() -> str:
+        """当前 A 股实盘券商（``broker:selected:CN`` → settings 兜底）。"""
+        return active_broker_name()
+
+    async def _has_open_qmt_orders(self) -> bool:
+        """本地是否还有未平 QMT 委托（30s 缓存，读失败按有单处理）。"""
+        now = asyncio.get_running_loop().time()
+        if now - self._open_check_at < BROKER_CHECK_SECONDS:
+            return self._has_open_orders
+        self._open_check_at = now
+        self._has_open_orders = await has_open_qmt_orders()
+        return self._has_open_orders
+
+    async def _refresh_gate(self) -> None:
+        now = asyncio.get_running_loop().time()
+        if now - self._gate_at < BROKER_CHECK_SECONDS:
+            return
+        self._gate_at = now
+        env_enabled = self._env_enabled()
+        broker = self._active_broker()
+        # 非 QMT 券商时才需要查「有没有遗留未平单」；QMT 是活跃券商则恒轮询。
+        open_orders = (
+            True if broker.strip().lower() == "qmt_exec"
+            else await self._has_open_qmt_orders()
+        )
+        allowed, reason = poll_decision(
+            env_enabled=env_enabled,
+            active_broker=broker,
+            has_open_orders=open_orders,
+        )
+        if allowed != self._poll_allowed or reason != self._poll_reason:
+            if allowed:
+                logger.info("[QmtExecPoller] 恢复轮询：%s", reason)
+            else:
+                logger.info("[QmtExecPoller] 暂停轮询：%s", reason)
+        self._poll_allowed = allowed
+        self._poll_reason = reason
+
     # -- 主循环 ---------------------------------------------------------
     async def run(self) -> None:
         client = self.client
@@ -131,12 +306,23 @@ class QmtExecPoller:
         )
         while True:
             try:
-                await self.poll_once()
+                await self._refresh_gate()
+                if not self._poll_allowed:
+                    self.stats["gate_skips"] += 1
+                    await asyncio.sleep(IDLE_POLL_SECONDS)
+                    continue
+                result = await self.poll_once()
+                if not isinstance(result, dict) or not result.get("error"):
+                    # 成功一轮即清零退避；限速/不健康才继续指数退避。
+                    self._fail_streak = 0
+                    self._backoff_s = 0.0
             except asyncio.CancelledError:
                 logger.info("[QmtExecPoller] 收到取消信号，退出轮询")
                 raise
             except Exception as exc:  # noqa: BLE001 - 常驻任务不能因单轮失败退出
                 self.stats["errors"] += 1
+                self._fail_streak += 1
+                self._backoff_s = next_backoff_s(self._fail_streak)
                 logger.warning("[QmtExecPoller] 轮询失败: %s", exc, exc_info=True)
             await asyncio.sleep(self._next_sleep())
 
@@ -145,7 +331,10 @@ class QmtExecPoller:
             return DISABLED_SLEEP_SECONDS
         if not is_trading_time():
             return OFF_HOURS_SLEEP_SECONDS
-        return self._interval
+        # 失败退避优先：桥不健康时 5s 硬打只会持续加压 QMT 主线程。
+        if self._backoff_s > self._interval:
+            self.stats["backoff_skips"] += 1
+        return max(self._interval, self._backoff_s)
 
     # -- 单轮 -----------------------------------------------------------
     async def poll_once(self) -> dict[str, int]:
@@ -224,22 +413,39 @@ class QmtExecPoller:
         }
 
     def _note_query_error(self, kind: str, exc: QmtExecError) -> None:
-        """查询失败分账：THROTTLED 是桥的预期退避，限频告警；其它错误照常。"""
+        """查询失败分账：THROTTLED 是桥的预期退避，限频告警；其它错误照常。
+
+        2026-11-27 加固：命中「桥/主线程不健康」错误码时进入指数退避，
+        不再固定 5s 硬打。修复前 2.5 小时累计 283 次失败，持续给已经挂死的
+        QMT adjust 主线程加压。
+        """
         self.stats["errors"] += 1
         code = str(getattr(exc, "code", "") or "")
-        if "THROTTLED" not in f"{code} {exc}":
+        text = f"{code} {exc}"
+        if any(token in text for token in _TRADE_UNHEALTHY_CODES):
+            self._fail_streak += 1
+            self._backoff_s = next_backoff_s(self._fail_streak)
+            logger.warning(
+                "[QmtExecPoller] %s 查询失败 code=%s，退避 %.0fs（连续 %d 次）: %s",
+                kind, code, self._backoff_s, self._fail_streak, exc,
+            )
+            return
+        if "THROTTLED" not in text:
             logger.warning(
                 "[QmtExecPoller] %s 查询失败 code=%s: %s", kind, code, exc
             )
             return
+        self._fail_streak += 1
+        self._backoff_s = next_backoff_s(self._fail_streak)
         self.stats["throttled"] += 1
         now = time.monotonic()
         if now - self._last_throttle_log >= THROTTLE_LOG_INTERVAL_S:
             self._last_throttle_log = now
             logger.info(
-                "[QmtExecPoller] %s 查询被桥限速（THROTTLED），按轮转节奏退避；"
+                "[QmtExecPoller] %s 查询被桥限速（THROTTLED），退避 %.0fs；"
                 "累计 throttled=%d errors=%d",
                 kind,
+                self._backoff_s,
                 self.stats["throttled"],
                 self.stats["errors"],
             )

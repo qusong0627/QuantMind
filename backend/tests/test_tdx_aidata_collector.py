@@ -65,6 +65,7 @@ def test_record_to_redis_keys_and_consumer_contract():
     # 标准键：series=前缀大写，snapshot=前缀小写（与 tdx_quote_feed/stream 一致）
     assert out["series_key"] == "market:series:SH600036"
     assert out["snapshot_key"] == "market:snapshot:sh600036"
+    assert out["snapshot_source_key"] == "market:snapshot:tdx:sh600036"
 
     snap = out["snapshot_fields"]
     # 消费方必读字段（RemoteRedisDataSource：Now/Open/PreClose/timestamp）
@@ -368,7 +369,16 @@ def test_drain_backlog_catches_up_across_batches():
     assert engine._drain_backlog() is True  # 一趟见底
     assert len(engine._queue) == 0
     assert engine.counters["written"] == 1200
-    assert len(written_keys) == 1200  # 全部经 hset 落库
+    # V3：每 tick 写 canonical + tdx 来源键，共 2400 次 hset
+    assert len(written_keys) == 2400
+    canonical = [
+        key for key in written_keys
+        if key.startswith("market:snapshot:")
+        and not key.startswith("market:snapshot:tdx:")
+    ]
+    source = [key for key in written_keys if key.startswith("market:snapshot:tdx:")]
+    assert len(canonical) == 1200
+    assert len(source) == 1200
 
 
 # ── 7. 配额/鉴权退避（2026-10-20：Token Insufficient 重订风暴）──────────
