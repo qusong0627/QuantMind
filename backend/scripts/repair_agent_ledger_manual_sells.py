@@ -196,6 +196,14 @@ async def load_unattributed_buys(
 
     与 :func:`load_unattributed_sells` 完全同口径（数量/价格以 ``trades`` 为准，
     回落委托累计），只是方向为 ``buy``。
+
+    **镜像单排除**（2026-11-27）：桥回报超时（``[AWAITING_BRIDGE_ACK]``）时，
+    模型真单会以另一张 ``agent=NULL`` 的桥委托行落库并成交；只看 agent 为空就
+    把它记成人工买入，会把模型的买入盈亏算到 ``manual`` 桶（当天 五芳斋/福恩
+    两笔就是这样进的 manual）。同一窗口（±30 分钟，按两行落库时刻、桥排队久
+    也不误伤）内存在**同标的/同方向/同数量**的镜像单（``client_order_id LIKE
+    'mir-%'``，带 agent）时不吸收——宁可留成账户侧差异（会进 ``ledger_excess``
+    报告），也不把模型单记成人工单。多个候选时同样不猜，一律不吸收。
     """
     from sqlalchemy import text
 
@@ -219,6 +227,17 @@ async def load_unattributed_buys(
                 "  AND o.status::text = 'filled' "
                 "  AND o.filled_quantity > 0 "
                 "  AND o.created_at >= :since "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM orders m "
+                "     WHERE m.tenant_id = o.tenant_id AND m.user_id = o.user_id "
+                "       AND COALESCE(m.agent, '') <> '' "
+                "       AND m.side::text = o.side::text "
+                "       AND m.symbol = o.symbol "
+                "       AND ABS(m.quantity - o.quantity) < 0.5 "
+                "       AND m.client_order_id LIKE 'mir-%' "
+                "       AND ABS(EXTRACT(EPOCH FROM (m.created_at - o.created_at)))"
+                "           <= 1800 "
+                "  ) "
                 "GROUP BY o.order_id, o.symbol, o.filled_quantity, "
                 "         o.average_price, o.created_at "
                 "ORDER BY o.created_at"

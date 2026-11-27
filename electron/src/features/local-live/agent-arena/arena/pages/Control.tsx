@@ -19,6 +19,7 @@ import { usePolling } from '../hooks/usePolling';
 import { fmtDate, fmtMoney, fmtPct, pnlClass } from '../utils/format';
 import { fmtAgo, fmtDateTime } from '../utils/datetime';
 import { shortName } from '../components/ModelCard';
+import { displayAgentName } from '../utils/agents';
 import TradingSettings from './TradingSettings';
 import './Control.css';
 
@@ -250,7 +251,7 @@ export default function Control() {
                   const posCount = Object.keys(ag.positions ?? {}).length;
                   return (
                     <tr key={name}>
-                      <td style={{ fontWeight: 700 }}>{name}</td>
+                      <td style={{ fontWeight: 700 }}>{displayAgentName(name)}</td>
                       <td className={ret != null ? pnlClass(ret) : 'dim'}>
                         {nav != null ? fmtMoney(nav, '¥', 0) : '—'}
                       </td>

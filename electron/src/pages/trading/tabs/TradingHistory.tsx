@@ -655,6 +655,20 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         }
     }, [timeRange]);
 
+    // 日结合计：模型口径与人工单分开（2026-11-27 用户口径——账户主手动全仓
+    // 银行股的 −6,224 不得算进模型已实现盈亏；后端 list_days 已在读侧重算）。
+    const settlementTotals = useMemo(() => {
+        let model = 0;
+        let manual = 0;
+        let manualFills = 0;
+        for (const row of settlementRows) {
+            model += Number(row.realized_pnl || 0);
+            manual += Number(row.manual_realized_pnl || 0);
+            manualFills += Number(row.manual_fills || 0);
+        }
+        return { model, manual, manualFills };
+    }, [settlementRows]);
+
     if (!isActive) return null;
 
     return (
@@ -1182,8 +1196,17 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                             {settlementRows.reduce((s, r) => s + (r.buy_value + r.sell_value), 0).toFixed(2)}
                             {' · '}费用合计{' '}
                             {settlementRows.reduce((s, r) => s + Number(r.total_fee || 0), 0).toFixed(2)}
-                            {' · '}已实现盈亏合计{' '}
-                            {settlementRows.reduce((s, r) => s + Number(r.realized_pnl || 0), 0).toFixed(2)}
+                            {' · '}已实现盈亏合计（模型）{' '}
+                            {settlementTotals.model.toFixed(2)}
+                            {settlementTotals.manual !== 0 && (
+                                <>
+                                    {' · '}人工单另计{' '}
+                                    <span className="text-gray-400">
+                                        {settlementTotals.manual.toFixed(2)}
+                                    </span>
+                                    （{settlementTotals.manualFills} 笔，不计入模型盈亏）
+                                </>
+                            )}
                         </div>
                         <div className="max-h-[520px] overflow-auto">
                             <table className="w-full text-xs">
@@ -1230,6 +1253,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                         <div className="text-[10px] text-gray-400 mt-2">
                             口径：智能体台账（成交/平仓）+ 执行事实（委托/费用/执行券商）+ 真实资金锚（快照）；
                             金额只认成交，费率为 0 表示券商回报里没有费用字段（不估算）。
+                            人工单（manual，账户主手动下单）单列，不计入模型盈亏。
                         </div>
                     </div>
                 )}

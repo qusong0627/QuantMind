@@ -142,7 +142,12 @@ export interface DailySettlementRow {
     transfer_fee: number;
     total_fee: number;
     net_cash_flow: number;
+    /** 模型口径已实现盈亏（manual 人工单桶不计入；后端 list_days 从 agents_json 重算） */
     realized_pnl: number;
+    /** 人工单（账户主手动下单）已实现盈亏；仅展示/对账用，不进模型口径 */
+    manual_realized_pnl?: number;
+    /** 人工单成交笔数 */
+    manual_fills?: number;
     cash: number | null;
     market_value: number | null;
     total_asset: number | null;

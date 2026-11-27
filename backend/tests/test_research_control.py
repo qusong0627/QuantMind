@@ -475,6 +475,96 @@ class TestPrompts:
         # 持仓条数必须与明细一致（实测出过「明细 6 只、正文写仅两只」）
         assert "照抄事实包明细" in text
 
+    def test_system_prompt_marks_manual_as_account_owner_orders(self):
+        """manual = 账户主人的人工单：不得写成研究总控或任何模型的操作。"""
+        text = rc_prompts.build_system_prompt()
+
+        assert "manual" in text
+        assert "人工单" in text
+        assert "不计入模型盈亏" in text
+
+
+class TestTradingFactsManualBucket:
+    """分账事实的 manual 桶口径（2026-11-27 用户：手动银行股被写进研究总控卡片）。"""
+
+    def _render(self, **overrides):
+        kwargs = dict(
+            day="2026-11-24",
+            positions=[],
+            position_detail={},
+            cash={},
+            fills=[],
+            recent=[],
+            roundtrips=[],
+            name_of=lambda code: "沪农商行",
+            suffix_of=lambda code: code,
+        )
+        kwargs.update(overrides)
+        return rc_dossier.render_trading_facts(**kwargs)
+
+    def test_manual_fills_and_pnl_are_split_from_model(self):
+        lines = self._render(
+            fills=[
+                ("glm-5.3-flash", "sell", 1, 3100, 18128.8),
+                ("manual", "buy", 1, 50600, 487126.2),
+                ("manual", "sell", 1, 94300, 901602.3),
+            ],
+            recent=[
+                ("manual", "601825.SH", "sell", 94300, 9.561, "2026-11-24 11:17:00")
+            ],
+            roundtrips=[
+                ("glm-5.3-flash", 1, 669.6, 3.83),
+                ("manual", 1, -6223.8, -0.69),
+            ],
+        )
+        text = "\n".join(lines)
+
+        # 口径注释 + 成交分段
+        assert "【口径】manual = 账户主人的人工单" in text
+        assert "当日成交（2026-11-24，仅模型）：" in text
+        assert "glm-5.3-flash 卖出 1 笔" in text
+        assert "人工单（账户主手动下单，不属于任何模型）：" in text
+        assert "人工单 买入 1 笔" in text and "人工单 卖出 1 笔" in text
+        # 最近成交里 manual 不得裸露成模型名
+        assert "人工单（账户主） 沪农商行" in text
+        # 已实现分段：人工金额不得进模型行
+        model_line = next(
+            ln for ln in lines if ln.startswith("当日已实现（已平仓，仅模型）")
+        )
+        assert "glm-5.3-flash" in model_line
+        assert "-6,224" not in model_line
+        manual_line = next(
+            ln for ln in lines if ln.startswith("人工单已实现")
+        )
+        assert "不计入模型盈亏" in manual_line and "-6,224" in manual_line
+
+    def test_manual_positions_are_not_listed_as_model_holdings(self):
+        lines = self._render(
+            day="2026-11-23",
+            positions=[("manual", 1, 898199.1)],
+            position_detail={"manual": ["沪农商行(601825.SH) 93300股@9.627"]},
+            cash={"manual": 912000.0},
+        )
+        text = "\n".join(lines)
+
+        assert "分账账本：模型无持仓" in text
+        assert "各 agent 分账账本" not in text
+        assert "人工仓（账户主手动持有，不属于任何模型）：" in text
+        assert "人工持仓明细" in text
+        assert "当日成交：无" in text
+        assert "当日已实现：无" in text
+
+    def test_model_only_day_has_no_manual_noise(self):
+        lines = self._render(
+            fills=[("deepseek-v4-flash", "sell", 1, 200, 4000.0)],
+            roundtrips=[("deepseek-v4-flash", 1, 140.0, 1.2)],
+        )
+        text = "\n".join(lines)
+
+        assert "【口径】manual" not in text
+        assert "人工单" not in text
+        assert "当日已实现（已平仓，仅模型）：deepseek-v4-flash" in text
+
 
 # ── 编排 ─────────────────────────────────────────────────────────────
 

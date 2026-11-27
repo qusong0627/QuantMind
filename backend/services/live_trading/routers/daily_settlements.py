@@ -75,7 +75,11 @@ async def list_settlements(
         "end": end_day.isoformat(),
         "count": len(rows),
         "rows": rows,
-        "note": "口径=智能体台账（成交/平仓）+ 执行事实（orders/trades）；金额只认成交",
+        "note": (
+            "口径=智能体台账（成交/平仓）+ 执行事实（orders/trades）；金额只认成交；"
+            "已实现盈亏为模型口径，人工单（manual）另计（manual_realized_pnl），"
+            "不计入模型盈亏"
+        ),
     }
 
 

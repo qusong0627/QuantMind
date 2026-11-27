@@ -5,8 +5,14 @@
  *  `market-research` 在「全部模型」视图裸露英文——旧的「缺了才补中文卡」
  *  兜底因 overview 早已含该行而永不触发。
  */
+/** 人工单归属桶（与后端 ``manual_sell_absorption.MANUAL_AGENT`` 同一口径）。
+ *  它**不是模型**：净值图不画、模型排名/型号筛选不放它；展示时写「人工单（账户主）」。
+ *  2026-11-27 用户口径：账户主手动全仓银行股的那笔 −6,224 不得读成模型/研究总控的业绩。 */
+export const MANUAL_AGENT = 'manual';
+
 const DISPLAY_NAMES: Record<string, string> = {
   'market-research': '市场研究',
+  [MANUAL_AGENT]: '人工单（账户主）',
 };
 
 export function displayAgentName(name: string | null | undefined): string {

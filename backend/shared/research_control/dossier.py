@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,17 @@ MAIN_INDEXES: tuple[tuple[str, str], ...] = (
 MEMORY_TAIL_ITEMS = 3
 #: 单段渲染上限（字符）——防止某一段把提示词吃光
 SECTION_LIMIT = 5200
+
+#: 人工单归属桶（与 ``backend.shared.decision.manual_sell_absorption.MANUAL_AGENT``
+#: 同一口径）。它**不是模型、也不是研究总控**：人工成交与人工盈亏必须在复盘里
+#: 单列并注明「不计入模型盈亏」，否则报告读起来像研究总控自己下了这些单
+#: （2026-11-27 用户口径：账户主手动全仓的银行股被写进了研究总控卡片）。
+MANUAL_AGENT = "manual"
+
+_MANUAL_NOTE = (
+    "【口径】manual = 账户主人的人工单（不属于任何模型，也不是研究总控下的单）；"
+    "人工成交与人工盈亏单列，不计入模型盈亏。"
+)
 
 
 # ── 小工具 ───────────────────────────────────────────────────────────
@@ -484,6 +496,119 @@ def collect_market(d: Dossier, env: dict[str, str], conn) -> None:
     d.sections["market"] = "\n".join(lines)
 
 
+def _is_manual_agent(agent: Any) -> bool:
+    """``manual`` 归属桶判据（大小写/空白宽容，与账本写侧同一口径）。"""
+    return str(agent or "").strip().lower() == MANUAL_AGENT
+
+
+def _manual_owner(agent: Any) -> str:
+    """报告里的归属称呼：manual 写「人工单（账户主）」，模型保留原名。"""
+    return "人工单（账户主）" if _is_manual_agent(agent) else str(agent)
+
+
+def render_trading_facts(
+    *,
+    day: str,
+    positions: Sequence[Sequence[Any]],
+    position_detail: Mapping[str, Sequence[str]],
+    cash: Mapping[str, float],
+    fills: Sequence[Sequence[Any]],
+    recent: Sequence[Sequence[Any]],
+    roundtrips: Sequence[Sequence[Any]],
+    name_of: Callable[[str], str],
+    suffix_of: Callable[[str], str],
+) -> list[str]:
+    """分账账本事实 → 复盘行（**纯函数**，无 DB / 无时钟）。
+
+    ``manual`` 不是模型：模型段只列模型；人工单（持仓/成交/已实现）单独成段
+    并显式注明「不属于任何模型、不计入模型盈亏」。这样研究总控写七段时不会把
+    账户主人的手动单读成自己或某个模型的操作（2026-11-27 用户口径）。
+    """
+    lines: list[str] = []
+    model_positions = [r for r in positions if not _is_manual_agent(r[0])]
+    manual_positions = [r for r in positions if _is_manual_agent(r[0])]
+    model_fills = [r for r in fills if not _is_manual_agent(r[0])]
+    manual_fills = [r for r in fills if _is_manual_agent(r[0])]
+    model_rt = [r for r in roundtrips if not _is_manual_agent(r[0])]
+    manual_rt = [r for r in roundtrips if _is_manual_agent(r[0])]
+    if manual_positions or manual_fills or manual_rt:
+        lines.append(_MANUAL_NOTE)
+
+    # ① 持仓（模型 / 人工分开）
+    if model_positions:
+        lines.append("各 agent 分账账本（只含授予额度与本人持仓，不含账户总资产）：")
+        for agent, n, cost in model_positions:
+            lines.append(
+                f"{agent}：持仓 {n} 只，成本 ¥{float(cost or 0):,.0f}，"
+                f"账面现金 ¥{cash.get(agent, 0):,.0f}"
+            )
+        for agent, items in position_detail.items():
+            if _is_manual_agent(agent):
+                continue
+            lines.append(f"  · {agent} 持仓明细：{'；'.join(items[:8])}")
+    else:
+        lines.append("分账账本：模型无持仓")
+    if manual_positions:
+        lines.append("人工仓（账户主手动持有，不属于任何模型）：")
+        for agent, n, cost in manual_positions:
+            lines.append(
+                f"  · 人工单：持仓 {n} 只，成本 ¥{float(cost or 0):,.0f}，"
+                f"账面现金 ¥{cash.get(agent, 0):,.0f}"
+            )
+        for agent, items in position_detail.items():
+            if _is_manual_agent(agent):
+                lines.append(f"  · 人工持仓明细：{'；'.join(items[:8])}")
+
+    # ② 当日成交（模型 / 人工分开）
+    if model_fills:
+        lines.append(f"当日成交（{day}，仅模型）：")
+        for agent, side, n, vol, amt in model_fills:
+            lines.append(
+                f"{agent} {'买入' if side == 'buy' else '卖出'} {n} 笔，"
+                f"{float(vol or 0):,.0f} 股，金额 ¥{float(amt or 0):,.0f}"
+            )
+    if manual_fills:
+        lines.append("人工单（账户主手动下单，不属于任何模型）：")
+        for _agent, side, n, vol, amt in manual_fills:
+            lines.append(
+                f"人工单 {'买入' if side == 'buy' else '卖出'} {n} 笔，"
+                f"{float(vol or 0):,.0f} 股，金额 ¥{float(amt or 0):,.0f}"
+            )
+    if not fills:
+        lines.append("当日成交：无")
+    if recent:
+        lines.append(
+            "最近成交："
+            + "；".join(
+                f"{_manual_owner(r[0])} {name_of(r[1])}({suffix_of(r[1])}) "
+                f"{'买' if r[2] == 'buy' else '卖'} {float(r[3] or 0):.0f}"
+                f"@{float(r[4] or 0):.3f} {str(r[5])[11:16]}"
+                for r in recent
+            )
+        )
+
+    # ③ 已实现盈亏（模型口径 / 人工单另计）
+    if model_rt:
+        lines.append(
+            "当日已实现（已平仓，仅模型）："
+            + "；".join(
+                f"{a} {n} 笔 ¥{float(p or 0):+,.0f}（{float(pct or 0):+.2f}%）"
+                for a, n, p, pct in model_rt
+            )
+        )
+    if manual_rt:
+        lines.append(
+            "人工单已实现（账户主手动，不计入模型盈亏）："
+            + "；".join(
+                f"人工单 {n} 笔 ¥{float(p or 0):+,.0f}（{float(pct or 0):+.2f}%）"
+                for _a, n, p, pct in manual_rt
+            )
+        )
+    if not roundtrips:
+        lines.append("当日已实现：无")
+    return lines
+
+
 def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
     if conn is None:
         d.sections["trading"] = "（数据缺口：PG 不可达，无分账账本数据）"
@@ -510,14 +635,8 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
         # 现金
         cur.execute("select agent, virtual_cash from qm_agent_ledger_account")
         cash = {r[0]: float(r[1] or 0) for r in cur.fetchall()}
+        detail: dict[str, list[str]] = {}
         if positions:
-            lines.append(
-                "各 agent 分账账本（只含授予额度与本人持仓，不含账户总资产）："
-            )
-            for agent, n, cost in positions:
-                lines.append(
-                    f"{agent}：持仓 {n} 只，成本 ¥{float(cost or 0):,.0f}，账面现金 ¥{cash.get(agent, 0):,.0f}"
-                )
             cur.execute(
                 """
                 select agent, code, volume, cost_price
@@ -525,16 +644,11 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
                 order by agent, volume * cost_price desc
                 """
             )
-            detail: dict[str, list[str]] = {}
             for agent, code, vol, cost in cur.fetchall():
                 detail.setdefault(agent, []).append(
                     f"{_name_of(code, names)}({_suffix(code)}) {float(vol):.0f}股"
                     f"@{float(cost or 0):.3f}"
                 )
-            for agent, items in detail.items():
-                lines.append(f"  · {agent} 持仓明细：{'；'.join(items[:8])}")
-        else:
-            lines.append("分账账本：无持仓")
         # 当日成交
         cur.execute(
             """
@@ -545,13 +659,8 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
             (d.day,),
         )
         fills = cur.fetchall()
+        recent: list[Sequence[Any]] = []
         if fills:
-            lines.append(f"当日成交（{d.day}）：")
-            for agent, side, n, vol, amt in fills:
-                lines.append(
-                    f"{agent} {'买入' if side == 'buy' else '卖出'} {n} 笔，"
-                    f"{float(vol or 0):,.0f} 股，金额 ¥{float(amt or 0):,.0f}"
-                )
             cur.execute(
                 """
                 select agent, code, side, volume, price, filled_at
@@ -560,15 +669,7 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
                 """,
                 (d.day,),
             )
-            recent = [
-                f"{r[0]} {_name_of(r[1], names)}({_suffix(r[1])}) "
-                f"{'买' if r[2] == 'buy' else '卖'} {float(r[3] or 0):.0f}@{float(r[4] or 0):.3f}"
-                f" {str(r[5])[11:16]}"
-                for r in cur.fetchall()
-            ]
-            lines.append("最近成交：" + "；".join(recent))
-        else:
-            lines.append("当日成交：无")
+            recent = list(cur.fetchall())
         # 已实现盈亏
         cur.execute(
             """
@@ -584,14 +685,19 @@ def collect_trading(d: Dossier, env: dict[str, str], conn) -> None:
             ),
         )
         rt = cur.fetchall()
-        if rt:
-            lines.append(
-                "当日已实现（已平仓）："
-                + "；".join(
-                    f"{a} {n} 笔 ¥{float(p or 0):+,.0f}（{float(pct or 0):+.2f}%）"
-                    for a, n, p, pct in rt
-                )
+        lines.extend(
+            render_trading_facts(
+                day=str(d.day),
+                positions=positions,
+                position_detail=detail,
+                cash=cash,
+                fills=fills,
+                recent=recent,
+                roundtrips=rt,
+                name_of=lambda code: _name_of(code, names),
+                suffix_of=_suffix,
             )
+        )
     except Exception as exc:  # noqa: BLE001
         d.gaps.append("ledger_unreadable")
         lines.append(f"分账账本不可读：{type(exc).__name__}")

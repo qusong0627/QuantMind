@@ -45,7 +45,7 @@ import { stockLabel, stockName } from '../utils/symbols';
 import { toLiveAdjust, toLiveFill } from '../utils/liveFills';
 // T6-3：账户快照时刻统一北京口径（aware 换算 / naive 原样）
 import { fmtBeijingDateTime } from '../../../../../utils/timeBeijing';
-import { displayAgentName, rankPerformers } from '../utils/agents';
+import { MANUAL_AGENT, displayAgentName, rankPerformers } from '../utils/agents';
 import { dayHit, dayOf, dayOptions } from '../utils/dayFilter';
 import { deriveBuyTimes } from '../utils/buyTime';
 import './Live.css';
@@ -327,6 +327,14 @@ export default function Live() {
   // 「立即分析」手动触发状态（对话 tab 筛选栏按钮）
   const [analyzeState, setAnalyzeState] = useState<'idle' | 'busy' | 'sent' | 'error'>('idle');
   const [analyzeMsg, setAnalyzeMsg] = useState('');
+  // 研究总控不是交易智能体：只存在于「模型对话」的筛选里。切到成交/已完成/持仓
+  // 时把残留的 market-research 选择复位，避免下拉空选+空列表被读成「它没交易」
+  // 甚至「它下过单」（2026-11-27 用户口径）。
+  useEffect(() => {
+    if (tab !== 'chat' && selectedModel === 'market-research') {
+      setSelectedModel('all');
+    }
+  }, [tab, selectedModel]);
   const runManualAnalysis = async () => {
     setAnalyzeState('busy');
     setAnalyzeMsg('');
@@ -447,9 +455,11 @@ export default function Live() {
         }
         return out.sort((a, b) => a.t - b.t);
       };
-      // 分账线：仅空仓那一段虚线（保留信息量），持仓段一律实线
+      // 分账线：仅空仓那一段虚线（保留信息量），持仓段一律实线。
+      // ``manual`` 是账户主的人工单桶，不是模型：画进模型赛马图会把人工盈亏
+      // 读成模型业绩（2026-11-27 用户口径），这里整条不画。
       const agentLines = Object.entries(eq.agents ?? {})
-        .filter(([, pts]) => pts.length >= 2)
+        .filter(([name, pts]) => name !== MANUAL_AGENT && pts.length >= 2)
         .map(([name, pts]) => {
           const line = toChartLine(
             `live-${name}`,
@@ -618,11 +628,16 @@ export default function Live() {
   /** 实盘持仓展示集：cn 分账时按选中模型收窄（hk 单一共享账户无分账，不按模型筛），
    *  大仓位在前。『持仓』tab 渲染与「日期」候选共用同一出处（见 renderList / dateOptions）。 */
   const livePosView = useMemo(() => {
-    const ag =
-      market === 'cn' && selectedModel !== 'all'
-        ? (liveLedger.data?.agents?.[selectedModel] ?? null)
-        : null;
-    const mine = ag ? new Set(ag.positions.map((lp) => lp.code)) : null;
+    const isModelFilter = market === 'cn' && selectedModel !== 'all';
+    const ag = isModelFilter
+      ? (liveLedger.data?.agents?.[selectedModel] ?? null)
+      : null;
+    // 选中具体模型但账本没有这个模型（如「市场研究（研究总控）」不是交易智能体）：
+    // 名下持仓必须是**空集**。回落 null=全量会把整个账户的持仓（含账户主人工单）
+    // 显示在「研究总控」筛选下，看起来像研究总控下了这些单（2026-11-27 用户口径）。
+    const mine = isModelFilter
+      ? new Set(ag ? ag.positions.map((lp) => lp.code) : [])
+      : null;
     const shown = (mine ? livePositions.filter((p) => mine.has(p.stock_code)) : livePositions)
       .slice()
       .sort((a, b) => Number(b.position_value) - Number(a.position_value));
@@ -945,7 +960,11 @@ export default function Live() {
         return (
           <div style={{ padding: '8px 12px' }}>
             <div className="pos-section-title">
-              {ag ? `模型 ${selectedModel} 名下持仓` : market === 'hk' ? '实盘持仓（富途）' : '实盘持仓（通达信桥）'}
+              {ag
+                ? `模型 ${selectedModel} 名下持仓`
+                : market === 'cn' && selectedModel !== 'all'
+                  ? `${selectedModel}：无分账交易账户（该模型不建仓）`
+                  : market === 'hk' ? '实盘持仓（富途）' : '实盘持仓（通达信桥）'}
               <span className="pos-section-sub">
                 {ag
                   ? `${shownPositions.length} 只 · 额度已用 ¥${ag.used.toLocaleString('en-US')} / ¥${ag.quota.toLocaleString('en-US')}`
@@ -960,7 +979,9 @@ export default function Live() {
                   ? `该日期（${dateFilter.slice(5)}）无买入的实盘持仓${unknownPos > 0 ? `（另有 ${unknownPos} 只买入日未知，未参与筛选）` : ''}`
                   : ag
                     ? '该模型名下暂无实盘持仓'
-                    : '暂无持仓'}
+                    : market === 'cn' && selectedModel !== 'all'
+                      ? '该模型不是交易智能体：没有分账账户，也不持有任何持仓'
+                      : '暂无持仓'}
               </div>
             )}
             {shownPositions.map((p) => {
@@ -1182,7 +1203,7 @@ export default function Live() {
                         <div className="trade-card-grid">
                           <span>归属{' '}
                             <b style={{ color: e.agent ? modelColor(e.agent) : '#000' }}>
-                              {e.agent ?? '总账户'}
+                              {e.agent ? displayAgentName(e.agent) : '总账户'}
                             </b>
                           </span>
                           <span>数量 <b>{e.volume.toLocaleString('en-US')}</b></span>
@@ -1217,7 +1238,7 @@ export default function Live() {
                       <div className="trade-card-grid">
                         <span>归属{' '}
                           <b style={{ color: e.agent ? modelColor(e.agent) : '#000' }}>
-                            {e.agent ?? '总账户'}
+                            {e.agent ? displayAgentName(e.agent) : '总账户'}
                           </b>
                         </span>
                         <span>数量 <b>{e.volume.toLocaleString('en-US')}</b></span>
@@ -1501,7 +1522,10 @@ export default function Live() {
                   .map((r) => (
                     <option key={r.name} value={r.name}>{r.name}</option>
                   ))}
-                {market === 'cn' && (
+                {market === 'cn' && tab === 'chat' && (
+                  /* 研究总控只写复盘、不建仓：只在「模型对话」里作为对话来源出现。
+                     成交/已完成/持仓三 tab 放它进筛选，会让用户以为它下过单
+                     （2026-11-27 用户口径：研究总控卡片里的 manual 成交被读成它下的单）。 */
                   <option key="market-research" value="market-research">市场研究（研究总控）</option>
                 )}
               </select>

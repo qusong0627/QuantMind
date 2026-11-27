@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -28,6 +30,7 @@ from backend.services.trade_shared.models.enums import (
     OrderSide,
     TradingMode,
 )
+from backend.shared.decision.manual_sell_absorption import MANUAL_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,46 @@ async def resolve_anchor_source(redis=None) -> str | None:
         except Exception:  # noqa: BLE001
             broker = ""
     return anchor_source_for_broker(broker)
+
+
+def split_realized_pnl(agents: Any) -> tuple[float, float, int]:
+    """台账 ``agents_json`` → ``(模型已实现, 人工已实现, 人工成交笔数)``。
+
+    ``manual`` 是账户主人的人工单归属桶，**不是模型**：模型口径的已实现盈亏
+    必须把它排除——否则账户主手动全仓银行股的一笔 −6,224 会被读成模型当天的
+    业绩（2026-11-27 用户口径：日结显示「已实现 −5,554」，实际模型只有 +670）。
+    人工桶缺失 → 两个金额都是 0（日结表列 NOT NULL，不给 None）。
+    """
+    doc = agents if isinstance(agents, Mapping) else {}
+    model = 0.0
+    manual = 0.0
+    manual_fills = 0
+    for name, entry in doc.items():
+        if not isinstance(entry, Mapping):
+            continue
+        try:
+            pnl = float(entry.get("realized_pnl") or 0.0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        if str(name or "").strip().lower() == MANUAL_AGENT:
+            manual += pnl
+            try:
+                manual_fills += int(entry.get("fills") or 0)
+            except (TypeError, ValueError):
+                pass
+        else:
+            model += pnl
+    return round(model, 2), round(manual, 2), manual_fills
+
+
+def _agents_doc(value: Any) -> dict[str, Any]:
+    """``agents_json`` 列（jsonb 可能回 dict，也可能回 JSON 字符串）→ dict。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 async def compute_day(
@@ -335,9 +378,12 @@ async def compute_day(
         entry["roundtrips"] = int(r["n"])
         entry["realized_pnl"] = round(float(r["pnl"] or 0), 2)
     payload["agents_json"] = agents
-    payload["realized_pnl"] = round(
-        sum(float(v.get("realized_pnl") or 0) for v in agents.values()), 2
-    )
+    model_pnl, manual_pnl, manual_fills = split_realized_pnl(agents)
+    payload["realized_pnl"] = model_pnl
+    # 人工单明细随 payload 返回给调用方（落库只存 agents_json，不新增列：
+    # 读侧 ``list_days`` 会从 agents_json 同一处重算，口径不会漂移）。
+    payload["manual_realized_pnl"] = manual_pnl
+    payload["manual_fills"] = manual_fills
 
     pos_rows = (
         (
@@ -493,8 +539,6 @@ async def run_day(
     anchor_source: str | None = None,
 ) -> dict[str, Any]:
     """计算并落库单日日结（幂等）。"""
-    import json
-
     await ensure_table_async(session)
     payload = await compute_day(
         session,
@@ -508,6 +552,9 @@ async def run_day(
     if not payload.get("has_activity") and payload.get("status") != "closed":
         return payload
     params = dict(payload)
+    # 人工单口径是**读侧派生**（list_days 从 agents_json 重算），表里没有这两列。
+    params.pop("manual_realized_pnl", None)
+    params.pop("manual_fills", None)
     for key in ("agents_json", "brokers_json", "positions_json", "recon_json"):
         params[key] = json.dumps(params.get(key) or {}, ensure_ascii=False, default=str)
     await session.execute(_UPSERT_SQL, params)
@@ -535,7 +582,22 @@ async def list_days(
         .mappings()
         .all()
     )
-    return [dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row = dict(r)
+        agents = _agents_doc(row.get("agents_json"))
+        if agents:
+            # 历史行也按同一口径重算：``realized_pnl`` 落库时曾含 manual，
+            # 读侧不重算会让 11-24 那笔人工 −6,224 永远混在模型日结里。
+            model_pnl, manual_pnl, manual_fills = split_realized_pnl(agents)
+            row["realized_pnl"] = model_pnl
+            row["manual_realized_pnl"] = manual_pnl
+            row["manual_fills"] = manual_fills
+        else:
+            row.setdefault("manual_realized_pnl", 0.0)
+            row.setdefault("manual_fills", 0)
+        out.append(row)
+    return out
 
 
 async def trading_days_between(start: date, end: date) -> list[date]:
