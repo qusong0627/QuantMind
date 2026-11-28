@@ -196,7 +196,7 @@ describe('SelectionStatsPanel', () => {
       '+91.24%',
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith('m1', {});
+    expect(fetchMock).toHaveBeenCalledWith('m1', { exclude_blacklist: false });
     // A 股红涨
     expect(screen.getByTestId('selection-stats-total-return').className).toContain(
       'text-red-600',

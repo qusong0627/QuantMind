@@ -33,6 +33,7 @@ import {
     OrderedListOutlined,
     SafetyCertificateOutlined,
     AuditOutlined,
+    StopOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -99,6 +100,9 @@ const NAV_GROUPS: NavGroupDef[] = [
         items: [
             { key: 'orders', label: '订单管理', icon: <OrderedListOutlined /> },
             { key: 'risk', label: '风险控制', icon: <SafetyCertificateOutlined /> },
+            // 交易黑名单（2026-11-28 自模拟交易「个人中心」迁入）：名单是全平台一份，
+            // 模拟/实盘候选信号、推送预检、决策轮共用，属于交易核心配置而非账户设置。
+            { key: 'blacklist', label: '交易黑名单', icon: <StopOutlined /> },
             // 评估中心自交易控制台迁入（2026-11-18）：评的是订单/持仓/策略/模型同一批
             // 交易核心对象，与风险控制同组；交易控制台的页签已随之删除。
             { key: 'eval', label: '评估中心', icon: <AuditOutlined /> },
@@ -341,7 +345,7 @@ const AdminPage: React.FC = () => {
 
                 <main
                     className={`flex-1 px-6 pt-6 pb-[60px] ${
-                        ['orders', 'risk', 'inference', 'profile'].includes(currentKey)
+                        ['orders', 'risk', 'inference', 'profile', 'blacklist'].includes(currentKey)
                             ? 'flex min-h-0 flex-col overflow-hidden'
                             : 'overflow-y-auto'
                     }`}
@@ -349,13 +353,16 @@ const AdminPage: React.FC = () => {
                     {/* 大屏页面用全宽，其余保留 1400px 阅读宽度（沿用旧规则） */}
                     <div
                         className={
-                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk', 'eval', 'profile'].includes(currentKey)
+                            ['news', 'inference', 'tags', 'settings', 'stock-pools', 'orders', 'risk', 'eval', 'profile', 'blacklist'].includes(currentKey)
                                 ? `min-h-0 animate-in fade-in slide-in-from-bottom-4 duration-500 ${
                                       ['orders', 'risk', 'profile'].includes(currentKey)
                                           ? 'flex w-full flex-1 flex-col'
-                                          : currentKey === 'inference'
-                                            ? 'mx-auto flex w-full max-w-[1400px] flex-1 flex-col'
-                                            : 'h-full w-full'
+                                          : currentKey === 'blacklist'
+                                              // 黑名单表自己带表头/分页，要撑满高度内部滚动
+                                              ? 'mx-auto flex min-h-0 w-full max-w-[1400px] flex-1 flex-col'
+                                              : currentKey === 'inference'
+                                                ? 'mx-auto flex w-full max-w-[1400px] flex-1 flex-col'
+                                                : 'h-full w-full'
                                   }`
                                 : currentKey === 'training-datasets'
                                     // 因子目录是 1720px 宽的列组表（三组指标 + 双侧固定列），

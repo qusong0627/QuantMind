@@ -274,6 +274,49 @@ def test_history_append_dedupes_same_window():
             assert len(svc.read_history("m1", 63)) == 2
 
 
+def test_picks_skip_blacklist_and_backfill_to_n():
+    """黑名单命中直接跳过，由后一名顺延补足——组合必须是 n 只，不是留空位。"""
+    frame = pd.DataFrame(
+        {
+            "date_key": ["20260105"] * 5,
+            "sym_suffix": ["A.SH", "B.SH", "C.SH", "D.SH", "E.SH"],
+            "pred": [0.90, 0.80, 0.70, 0.60, 0.50],
+        }
+    )
+    picks = svc._picks_from_frame(
+        frame, 3, excluded_symbols=frozenset({"A.SH", "C.SH"})
+    )
+    assert picks["20260105"] == ["B.SH", "D.SH", "E.SH"]
+    # 不传名单时保持原口径
+    baseline = svc._picks_from_frame(frame, 3)
+    assert baseline["20260105"] == ["A.SH", "B.SH", "C.SH"]
+
+
+def test_blacklist_variant_has_separate_cache_and_history():
+    """两个口径互不覆盖：报告/状态/锁/历史快照都必须分文件。"""
+    base = svc._cache_paths("m1", 63)
+    excl = svc._cache_paths("m1", 63, True)
+    assert base["report"] != excl["report"]
+    assert base["status"] != excl["status"]
+    assert base["lock"] != excl["lock"]
+    assert excl["report"].name.endswith("_excl.json")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(svc, "_cache_dir", return_value=Path(tmp)):
+            report = {
+                "window": {"start": "2026-08-11", "end": "2026-11-13"},
+                "computed_at": "2026-11-28 10:00:00",
+                "metrics": {},
+                "topn": [],
+                "verdict": _verdict(long_pass=False),
+                "admission": {"grade": "yellow"},
+            }
+            svc.append_history("m1", 63, report)
+            svc.append_history("m1", 63, report, exclude_blacklist=True)
+            assert len(svc.read_history("m1", 63)) == 1
+            assert len(svc.read_history("m1", 63, exclude_blacklist=True)) == 1
+
+
 def test_deterioration_reasons_red_and_streak():
     from backend.services.engine.tasks.model_signal_eval_tasks import (
         _deterioration_reasons,

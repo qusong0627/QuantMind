@@ -2762,6 +2762,9 @@ async def _require_signal_admission(
 async def get_model_signal_eval(
     model_id: str,
     window_days: int = 63,
+    exclude_blacklist: bool = Query(
+        False, description="TopN 选股剔除交易黑名单（跳过并顺延补足，实盘口径）"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """只统计推理过的 test 切分；窗口随推理与行情自动前移。"""
@@ -2784,6 +2787,7 @@ async def get_model_signal_eval(
         horizon=horizon,
         execution_price=execution_price,
         window_days=days,
+        exclude_blacklist=bool(exclude_blacklist),
     )
 
 
@@ -2791,6 +2795,9 @@ async def get_model_signal_eval(
 async def refresh_model_signal_eval(
     model_id: str,
     window_days: int = 63,
+    exclude_blacklist: bool = Query(
+        False, description="TopN 选股剔除交易黑名单（跳过并顺延补足，实盘口径）"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     from backend.services.api import model_signal_eval_service
@@ -2812,6 +2819,7 @@ async def refresh_model_signal_eval(
         horizon=horizon,
         execution_price=execution_price,
         window_days=days,
+        exclude_blacklist=bool(exclude_blacklist),
     )
 
 
@@ -4483,10 +4491,13 @@ def _load_features_daily_market_cap(
 async def get_model_inference_run_detail(
     run_id: str,
     limit: int = Query(0, ge=0, le=10000, description="0=全部；>0 只返回前 N 行"),
+    exclude_blacklist: bool = Query(
+        False, description="按交易黑名单剔除信号（推理中心「排除黑名单」开关）"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     tenant_id, user_id = _owner_scope(current_user)
-    cache_key = (tenant_id, user_id, run_id, limit)
+    cache_key = (tenant_id, user_id, run_id, limit, bool(exclude_blacklist))
     cached = _INFER_DETAIL_CACHE.get(cache_key)
     if cached and time.time() - cached[0] < _INFER_DETAIL_TTL:
         return cached[1]
@@ -4552,6 +4563,7 @@ async def get_model_inference_run_detail(
                             )
                             SELECT
                                 ess.symbol,
+                                ess.canonical_symbol,
                                 ess.fusion_score,
                                 ess.light_score,
                                 ess.tft_score,
@@ -4669,9 +4681,45 @@ async def get_model_inference_run_detail(
                             _data_date,
                         )
         except Exception as exc:  # pragma: no cover - pred.parquet fallback
-            logger.warning(
-                "pred.parquet fallback failed for %s: %s", run_id, exc
+            logger.warning("pred.parquet fallback failed for %s: %s", run_id, exc)
+
+    # ── 交易黑名单剔除（推理中心「排除黑名单」）──
+    blacklist_meta: dict[str, Any] = {"applied": False}
+    if exclude_blacklist:
+        from backend.shared.exclusion_list import load_exclusion_list
+        from backend.shared.stock_utils import StockCodeUtil
+
+        exclusion = load_exclusion_list("CN")
+        if exclusion is None:
+            # 名单缺失是配置事故，不静默返回「看起来正常但没排除」的榜单
+            raise HTTPException(
+                status_code=409,
+                detail="排除名单未导入（data/exclusions/cn.json），无法按黑名单口径展示",
             )
+        blocked = exclusion.symbols()
+        kept: list[dict[str, Any]] = []
+        removed = 0
+        for item in signals:
+            raw = item.get("canonical_symbol") or item.get("symbol")
+            suffix = StockCodeUtil.to_suffix(str(raw or ""))
+            if suffix and suffix in blocked:
+                removed += 1
+                continue
+            kept.append(item)
+        signals = kept
+        blacklist_meta = {
+            "applied": True,
+            "removed": removed,
+            "excluded": len(blocked),
+            "asof": exclusion.asof,
+        }
+        logger.info(
+            "[inference-detail] %s 按黑名单剔除 %d 行（名单 %d 只，asof=%s）",
+            run_id,
+            removed,
+            len(blocked),
+            exclusion.asof,
+        )
 
     # ── 股票简称兜底：PG stocks 表已废弃，名称以 QuantDB instrument_list 为准 ──
     # 覆盖 DB JOIN 取不到名称（stocks 表为空/格式不匹配）与 pred.parquet 回退
@@ -4702,6 +4750,7 @@ async def get_model_inference_run_detail(
         logger.warning("回填股票简称失败: %s", exc)
 
     summary = dict(run)
+    summary["blacklist"] = blacklist_meta
     summary["rows_count"] = len(signals)
     summary["symbols_count"] = len(
         {str(item.get("symbol") or "") for item in signals if item.get("symbol")}

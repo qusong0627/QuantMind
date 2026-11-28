@@ -282,6 +282,7 @@ async def get_sim_account(
         f"{_UPSTREAM}/account",
         principal=principal,
         params={"market": market},
+        raw=True,
     ) or {}
     return _unwrap_account(raw, market)
 

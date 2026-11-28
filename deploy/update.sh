@@ -530,6 +530,12 @@ main() {
         else
             log '3/5 跳过前端镜像（quantmind-web 不存在/未运行：该部署不走独立 web 容器）'
         fi
+        # MCP 服务镜像（2026-11-28）：独立容器，源码在 mcp_server/ + 共享工具目录
+        log '3b/5 构建 MCP 镜像'
+        docker build \
+            -f "$PROJECT_DIR/docker/Dockerfile.mcp" \
+            -t quantmind-mcp:latest "$PROJECT_DIR" \
+            || die 'MCP 镜像构建失败（后端尚未重启，现场保持旧版本）'
     else
         warn "跳过 minibt runner 镜像构建（--no-build）；镜像缺失时 minibt 策略不可用"
         warn "跳过前端镜像构建与部署（--no-build）：前端保持当前版本"

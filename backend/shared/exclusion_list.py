@@ -67,8 +67,8 @@ _SOURCE_LABELS: dict[str, str] = {
     "block_buy": "操作员黑名单",
     "risk_block_warn": "质押告警（只提示）",
     "risk_block_watch": "监管关注（只提示）",
-    "user_manual": "手工排除（本人在个人中心添加）",
-    "user_allow": "手工放行（本人在个人中心解除）",
+    "user_manual": "手工排除（后台管理·交易核心添加）",
+    "user_allow": "手工放行（后台管理·交易核心解除）",
 }
 
 
@@ -537,10 +537,10 @@ def _load_cached(root: str, market: str) -> ExclusionList | None:
     """进程内缓存。
 
     名单是**每日刷新**的产物、不是热点数据，故按 ``(root, market, 两个文件的 mtime)``
-    缓存：mtime 变了自动失效（导入器覆盖写改 ``cn.json``、个人中心改 ``cn_user.json``），
+    缓存：mtime 变了自动失效（导入器覆盖写改 ``cn.json``、后台管理改 ``cn_user.json``），
     不需要 TTL 轮询。
 
-    **两个 mtime 都要进键**：只盯机器名单的话，用户在个人中心加了票、下一次拉列表
+    **两个 mtime 都要进键**：只盯机器名单的话，管理员在后台管理加了票、下一次拉列表
     却还是旧结果——而他刚刚在界面上看到了「已保存」。
     """
     base = Path(root)

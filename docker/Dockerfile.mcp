@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app
+
+# 版本钉死：MCP SDK 的 HTTP 入口在不同版本间改过形状，升级要显式重建并跑契约测试
+RUN pip install --no-cache-dir \
+        "mcp==1.30.0" \
+        "httpx>=0.28,<0.29" \
+        "redis>=5,<6"
+
+WORKDIR /app
+# 工具目录是 backend / MCP 共用的唯一事实源（不在镜像里复制第二份逻辑）
+COPY backend/__init__.py /app/backend/__init__.py
+COPY backend/shared/__init__.py /app/backend/shared/__init__.py
+COPY backend/shared/mcp_tool_catalog.py /app/backend/shared/mcp_tool_catalog.py
+COPY mcp_server /app/mcp_server
+
+EXPOSE 8765
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2)"
+
+CMD ["python", "-m", "mcp_server.main"]

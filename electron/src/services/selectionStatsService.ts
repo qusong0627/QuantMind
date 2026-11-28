@@ -79,6 +79,7 @@ class SelectionStatsService {
     if (typeof query.capital === 'number' && Number.isFinite(query.capital)) {
       params.capital = query.capital;
     }
+    if (query.exclude_blacklist) params.exclude_blacklist = 'true';
 
     const resp = await this.client.get<SelectionStatsResponse>(
       `${BASE_PATH}/${encodeURIComponent(modelId)}/selection-stats`,

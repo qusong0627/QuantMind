@@ -616,6 +616,13 @@ build_and_start() {
     # minibt 策略/AI-IDE 回测依赖独立 runner 镜像；compose 不管它。
     # 按「镜像存在 + minibt 源码/构建脚本指纹」决定是否重建；失败只警告。
     qm_build_minibt_runner_if_needed "$PROJECT_DIR" || true
+    # MCP 服务镜像（2026-11-28）：compose 里是独立容器，必须在 up 之前就绪
+    if ! docker image inspect quantmind-mcp:latest >/dev/null 2>&1; then
+        log '构建 MCP 服务镜像（quantmind-mcp:latest）'
+        docker build -f "$PROJECT_DIR/docker/Dockerfile.mcp" \
+            -t quantmind-mcp:latest "$PROJECT_DIR" \
+            || die 'MCP 镜像构建失败'
+    fi
     "${QM_COMPOSE[@]}" up -d --pull never
     configure_qwenpaw_runtime
 

@@ -110,6 +110,7 @@ export interface BlendRankingResponse {
   ranking: BlendRankingRow[];
   stats?: BlendRankingStats;
   warnings: string[];
+  blacklist?: { applied: boolean; removed?: number; excluded?: number };
 }
 
 export interface BlendDatesResponse {
@@ -901,6 +902,7 @@ export interface BlendPreviewRequest {
   min_coverage?: number;
   consensus_min_count?: number;
   weights?: Record<string, number> | null;
+  exclude_blacklist?: boolean;
 }
 
 export interface BlendCreateRequest {

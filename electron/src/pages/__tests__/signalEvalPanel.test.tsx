@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { modelTrainingService } from '../../services/modelTrainingService';
 import type {
   SignalEvalAdmission,
@@ -240,8 +240,50 @@ describe('SignalEvalPanel 测试集实盘力', () => {
     });
     render(<SignalEvalPanel modelId="mdl_signal" />);
 
-    await waitFor(() => expect(mockedRefresh).toHaveBeenCalledWith('mdl_signal'));
+    await waitFor(() =>
+      expect(mockedRefresh).toHaveBeenCalledWith('mdl_signal', { excludeBlacklist: false }),
+    );
     expect(await screen.findByText('排序有效 · 长多未过线')).toBeInTheDocument();
+  });
+
+  test('打开「排除黑名单」走独立口径并显示剔除数量', async () => {
+    const excludedReport: SignalEvalReport = {
+      ...sampleReport(),
+      blacklist: {
+        applied: true,
+        excluded: 123,
+        asof: '2026-11-27',
+        overlay_updated_at: '2026-11-28T10:00:00Z',
+        pit: false,
+        note: 'TopN 选股逐只跳过黑名单并顺延补足',
+      },
+    };
+    mockedGet.mockImplementation(async (_modelId, options) =>
+      options?.excludeBlacklist
+        ? {
+            status: 'ready',
+            report: excludedReport,
+            admission: sampleAdmission(),
+            history: [],
+            stale: false,
+          }
+        : {
+            status: 'ready',
+            report: sampleReport(),
+            admission: sampleAdmission(),
+            history: [],
+            stale: false,
+          },
+    );
+    render(<SignalEvalPanel modelId="mdl_signal" />);
+    await screen.findByText('排序有效 · 长多未过线');
+
+    fireEvent.click(screen.getByRole('switch'));
+
+    await waitFor(() =>
+      expect(mockedGet).toHaveBeenLastCalledWith('mdl_signal', { excludeBlacklist: true }),
+    );
+    expect(await screen.findByText('黑名单生效 123 只')).toBeInTheDocument();
   });
 
   test('running 态展示进度', async () => {

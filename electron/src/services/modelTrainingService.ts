@@ -418,6 +418,13 @@ export interface InferenceRunRecord {
   market_ma_filter?: MarketMAFilter;
   negative_analysis?: NegativeAnalysis;
   is_wide_scale?: boolean;
+  /** 推理中心「排除黑名单」口径的统计（未启用时不带或 applied=false） */
+  blacklist?: {
+    applied: boolean;
+    removed?: number;
+    excluded?: number;
+    asof?: string | null;
+  };
 }
 
 export interface ScoreDistributionBucket {
@@ -1312,18 +1319,27 @@ class ModelTrainingService {
     return resp.data;
   }
 
-  /** 测试集实盘力（滚动 3 个月）：缓存/运行状态。 */
-  async getModelSignalEval(modelId: string): Promise<SignalEvalState> {
+  /**
+   * 测试集实盘力（滚动 3 个月）：缓存/运行状态。
+   * `excludeBlacklist=true` 走「TopN 剔除黑名单」口径（独立缓存，不覆盖默认视图）。
+   */
+  async getModelSignalEval(modelId: string, options?: { excludeBlacklist?: boolean }): Promise<SignalEvalState> {
     const resp = await this.client.get<SignalEvalState>(
       `/models/${encodeURIComponent(modelId)}/signal-eval`,
+      { params: options?.excludeBlacklist ? { exclude_blacklist: true } : undefined },
     );
     return resp.data;
   }
 
   /** 触发后台重算（幂等：已有作业时返回 running）。 */
-  async refreshModelSignalEval(modelId: string): Promise<{ status: string }> {
+  async refreshModelSignalEval(
+    modelId: string,
+    options?: { excludeBlacklist?: boolean },
+  ): Promise<{ status: string }> {
     const resp = await this.client.post<{ status: string }>(
       `/models/${encodeURIComponent(modelId)}/signal-eval/refresh`,
+      undefined,
+      { params: options?.excludeBlacklist ? { exclude_blacklist: true } : undefined },
     );
     return resp.data;
   }
@@ -1449,6 +1465,7 @@ class ModelTrainingService {
       market_ma_filter: raw?.market_ma_filter && typeof raw.market_ma_filter === 'object' ? raw.market_ma_filter as MarketMAFilter : undefined,
       negative_analysis: raw?.negative_analysis && typeof raw.negative_analysis === 'object' ? raw.negative_analysis as NegativeAnalysis : undefined,
       is_wide_scale: raw?.is_wide_scale !== undefined ? Boolean(raw.is_wide_scale) : undefined,
+      blacklist: raw?.blacklist && typeof raw.blacklist === 'object' ? raw.blacklist : undefined,
     };
   }
 
@@ -1497,7 +1514,11 @@ class ModelTrainingService {
     };
   }
 
-  async getInferenceResult(runId: string, limit?: number): Promise<InferenceRankingResult> {
+  async getInferenceResult(
+    runId: string,
+    limit?: number,
+    options?: { excludeBlacklist?: boolean },
+  ): Promise<InferenceRankingResult> {
     const resp = await this.client.get<{
       summary: InferenceRunRecord;
       page: number;
@@ -1526,7 +1547,10 @@ class ModelTrainingService {
         negative_tag?: string | null;
       }>;
     }>(`/models/inference/runs/${runId}`, {
-      params: limit && limit > 0 ? { limit } : undefined,
+      params: {
+        ...(limit && limit > 0 ? { limit } : {}),
+        ...(options?.excludeBlacklist ? { exclude_blacklist: true } : {}),
+      },
     });
 
     const data = resp.data;

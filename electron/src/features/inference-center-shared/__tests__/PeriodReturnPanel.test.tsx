@@ -369,7 +369,7 @@ describe('PeriodReturnPanel', () => {
         onCalculate={vi.fn()}
       />,
     );
-    expect(screen.getByText(/按模板滚动评估综合选股收益/)).toBeInTheDocument();
+    expect(screen.getByText(/按模板滚动评估组合综合排名收益/)).toBeInTheDocument();
     expect(screen.queryByTestId('combo-period-total-return')).toBeNull();
   });
 });

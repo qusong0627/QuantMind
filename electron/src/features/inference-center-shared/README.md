@@ -26,13 +26,13 @@
 inference-center-shared/
 ├── adapter.tsx                        ★ InferenceCenterProvider / useInferenceCenter
 ├── pages/InferenceCenterShell.tsx     ★ 顶栏 + 顶层 Tab 的完整状态机
-├── hooks/useComboWorkspace.ts         组合选股工作区状态（组合/榜单/滚动/计划加载）
+├── hooks/useComboWorkspace.ts         组合排名工作区状态（组合/榜单/滚动/计划加载）
 └── components/                        市场无关的展示组件
     ├── StockForecastChart.tsx         K 线 + P10/P50/P90 预测扇形（currencySymbol 参数化）
     ├── ModelScoreCurveGrid.tsx        多模型分数曲线小卡
     ├── FeatureDriversPanel.tsx        SHAP / 启发式因子归因
     ├── ModelConsensusPanel.tsx        多模型共识矩阵
-    └── combo/                         组合选股工作区（榜单/滚动/证据/调仓计划/补推弹窗）
+    └── combo/                         组合排名工作区（榜单/滚动/证据/调仓计划/补推弹窗）
 ```
 
 ## 适配器要提供什么
@@ -95,9 +95,9 @@ inference-center-shared/
 - **期货品种目录 = 热力图全集**，包含国内主力与上金所现货延期品种；点进无日K的品种
   （如部分 `Au(T+D)`）时 K 线区诚实报「未找到期货标的」404，不做假数据兜底。
 
-## 组合选股工作区（2026-10-21）
+## 组合排名工作区（2026-10-21）
 
-- 入口：推理中心顶栏「组合选股」Tab（`components/combo/ComboWorkspace.tsx`），
+- 入口：推理中心顶栏「组合排名」Tab（`components/combo/ComboWorkspace.tsx`），
   数据全部走 `services/blendService.ts` → `/api/v1/models/blends/*`。
 - **组合（blend）≠ 融合模型（fusion）**：blend 只在推理时对成员模型的截面分位做加权合成，
   **不训练新模型、不改写成员 `pred`**；成员必须同市场、同预测周期（horizon）。

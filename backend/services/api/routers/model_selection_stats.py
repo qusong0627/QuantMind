@@ -45,6 +45,9 @@ async def get_selection_stats(
         description="持有交易日数；缺省取模型 target_horizon_days，1=每日滚动",
     ),
     capital: float = Query(default=10_000_000.0, gt=0, le=1e12, description="初始资金"),
+    exclude_blacklist: bool = Query(
+        default=False, description="按交易黑名单剔除入选标的（推理中心「排除黑名单」开关）"
+    ),
     current_user: Mapping[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     tenant_id, user_id = _owner(current_user)
@@ -58,6 +61,7 @@ async def get_selection_stats(
             top_k=top_k,
             hold_days=hold_days,
             capital=capital,
+            exclude_blacklist=bool(exclude_blacklist),
         )
     except SelectionStatsError as exc:
         raise HTTPException(

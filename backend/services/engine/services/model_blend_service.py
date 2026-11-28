@@ -147,6 +147,20 @@ class BlendError(Exception):
         self.code = code
 
 
+def _blocking_list_symbols() -> frozenset[str]:
+    """当前生效的交易黑名单（后缀式）。缺失按配置事故显式报错。"""
+    from backend.shared.exclusion_list import load_exclusion_list
+
+    exclusion = load_exclusion_list("CN")
+    if exclusion is None:
+        raise BlendError(
+            "排除名单未导入（data/exclusions/cn.json），无法按黑名单口径计算",
+            status_code=409,
+            code="blacklist_unavailable",
+        )
+    return exclusion.symbols()
+
+
 def _parse_date(value: str | date | None) -> date | None:
     if value is None or isinstance(value, date):
         return value
@@ -760,6 +774,7 @@ class ModelBlendService:
         top: int = 500,
         blend_id: str | None = None,
         annotate: bool = False,
+        exclude_blacklist: bool = False,
     ) -> dict[str, Any]:
         result, runs, warnings = await self._combine_runs(
             tenant_id=tenant_id,
@@ -772,12 +787,27 @@ class ModelBlendService:
             trim_count=trim_count,
             consensus_min_count=consensus_min_count,
         )
+        blacklist_meta: dict[str, Any] = {"applied": False}
+        source_rows = result.rows
+        if exclude_blacklist:
+            blocked = _blocking_list_symbols()
+            kept = [
+                row
+                for row in source_rows
+                if StockCodeUtil.to_suffix(str(row.symbol)) not in blocked
+            ]
+            blacklist_meta = {
+                "applied": True,
+                "removed": len(source_rows) - len(kept),
+                "excluded": len(blocked),
+            }
+            source_rows = kept
         names = await self._stock_names()
         market = str(members[0].get("market") or CN_MARKET) if members else CN_MARKET
         profiles = await self._stock_profiles(market)
         rows = [
             self._row_payload(row, names, profiles)
-            for row in result.rows[: max(1, top)]
+            for row in source_rows[: max(1, top)]
         ]
         if annotate:
             window = await self._window_stats(
@@ -806,6 +836,7 @@ class ModelBlendService:
             "data_trade_date": data_trade_date.isoformat(),
             "members": self._member_payload(members, runs, weights),
             "ranking": rows,
+            "blacklist": blacklist_meta,
             "stats": dict(result.stats),
             "warnings": warnings,
         }
@@ -826,6 +857,7 @@ class ModelBlendService:
         min_coverage: int = 2,
         consensus_min_count: int = 0,
         top: int = 200,
+        exclude_blacklist: bool = False,
     ) -> dict[str, Any]:
         members = await self._resolve_members(
             tenant_id=tenant_id,
@@ -862,6 +894,7 @@ class ModelBlendService:
             trim_count=trim_count,
             consensus_min_count=consensus_min_count,
             top=max(top, top_k),
+            exclude_blacklist=exclude_blacklist,
         )
         payload["data_trade_date"] = target.isoformat()
         payload["signature"] = combo_auto.signature_of(members[0])

@@ -1,5 +1,5 @@
 /**
- * 交易黑名单 API（个人中心「交易黑名单」表格）。
+ * 交易黑名单 API（后台管理 · 交易核心「交易黑名单」表格）。
  *
  * 后端信封是 `{success, data}`，这里统一拆包只回 `data`——调用方拿到的是行数组
  * 而不是 `resp.data.data`，否则每个调用点都要重复一次信封知识，改一次漏一处。
@@ -100,6 +100,25 @@ export class TradingBlacklistService {
     try {
       const resp = await this.client.get('/exclusion/meta');
       return resp.data.data as BlacklistMetaResponse;
+    } catch (err) {
+      throw new Error(detailOf(err));
+    }
+  }
+
+  /**
+   * 当前生效（blocking 且未过期）的代码集合（后缀式）。
+   * 推理中心「排除黑名单」开关用这一份；未导入时 `imported=false`，调用方显式展示。
+   */
+  async blockingSymbols(market = 'CN'): Promise<{
+    imported: boolean;
+    reason?: string;
+    asof: string | null;
+    count: number;
+    symbols: string[];
+  }> {
+    try {
+      const resp = await this.client.get('/exclusion/symbols', { params: { market } });
+      return resp.data.data;
     } catch (err) {
       throw new Error(detailOf(err));
     }

@@ -357,9 +357,9 @@ describe('榜单 CSV', () => {
 
   it('文件名去掉路径非法字符', () => {
     expect(rankingCsvFilename('13 模型/T+10', '2026-10-19')).toBe(
-      '组合选股_13 模型_T+10_2026-10-19.csv',
+      '组合排名_13 模型_T+10_2026-10-19.csv',
     );
-    expect(rankingCsvFilename('   ', '2026-10-19')).toBe('组合选股_combo_2026-10-19.csv');
+    expect(rankingCsvFilename('   ', '2026-10-19')).toBe('组合排名_combo_2026-10-19.csv');
   });
 });
 

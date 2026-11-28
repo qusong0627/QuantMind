@@ -1,5 +1,5 @@
 /**
- * 组合选股工作区（布局与状态编排）。
+ * 组合排名工作区（布局与状态编排）。
  *
  * 左栏组合/模板，右栏四个 Tab；数据统一由 `useComboWorkspace` 持有（单一状态源）。
  * 页面不出现方向性字眼：榜单/滚动/计划只说「靠前/居中/靠后」「新进/留存/退出」。
@@ -21,9 +21,11 @@ import { ComboEvidencePanel } from './ComboEvidencePanel';
 export interface ComboWorkspaceProps {
   market: string;
   marketLabel: string;
-  /** 治理面板「组合选股」带入的模型；nonce 变化触发一次预填 */
+  /** 治理面板「组合排名」带入的模型；nonce 变化触发一次预填 */
   seedModelIds?: string[];
   seedNonce?: number;
+  /** 推理中心「排除黑名单」开关：榜单按交易黑名单剔除 */
+  excludeBlacklist?: boolean;
 }
 
 const POSITION_HINT =
@@ -34,8 +36,9 @@ export const ComboWorkspace: React.FC<ComboWorkspaceProps> = ({
   marketLabel,
   seedModelIds,
   seedNonce,
+  excludeBlacklist = false,
 }) => {
-  const state = useComboWorkspace(market);
+  const state = useComboWorkspace(market, excludeBlacklist);
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderModelIds, setBuilderModelIds] = useState<string[]>([]);
   const [builderTemplate, setBuilderTemplate] = useState(false);
@@ -61,7 +64,7 @@ export const ComboWorkspace: React.FC<ComboWorkspaceProps> = ({
 
   const isTemplate = state.selection?.kind === 'template';
   const blendName =
-    state.selectedBlend?.name ?? state.selectedTemplate?.name ?? '组合选股';
+    state.selectedBlend?.name ?? state.selectedTemplate?.name ?? '组合排名';
   const holdDays = state.selectedBlend?.rolling_window ?? null;
 
   const dateHint = isTemplate
@@ -90,6 +93,11 @@ export const ComboWorkspace: React.FC<ComboWorkspaceProps> = ({
               <span className="text-xs font-black text-slate-800 truncate">{blendName}</span>
               <Tag color="blue" className="!m-0 text-[10px]">{marketLabel}</Tag>
               {isTemplate && <Tag className="!m-0 text-[10px]">模板预览</Tag>}
+              {state.ranking?.blacklist?.applied && (
+                <Tag color="red" className="!m-0 text-[10px]">
+                  黑名单剔除 {state.ranking.blacklist.removed ?? 0}
+                </Tag>
+              )}
             </div>
             <Tooltip title={POSITION_HINT}>
               <div className="text-[10px] text-slate-400 cursor-help">

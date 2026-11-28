@@ -599,7 +599,7 @@ export const PeriodReturnPanel: React.FC<PeriodReturnPanelProps> = ({
       <div className="flex-1 min-h-0 overflow-auto overscroll-contain p-3 space-y-3">
         {!period || !summary ? (
           <div className="h-full flex items-center justify-center">
-            <Empty description="选好区间后点「计算」，按模板滚动评估综合选股收益" />
+            <Empty description="选好区间后点「计算」，按模板滚动评估组合综合排名收益" />
           </div>
         ) : (
           <>
@@ -722,7 +722,7 @@ export const PeriodReturnPanel: React.FC<PeriodReturnPanelProps> = ({
         初始资金 ÷ 持仓上限；期末未到期按最后有效收盘价估值。基准为
         {period?.benchmark?.name ?? '本市场基准（未接入）'}，按日收益复利并与
         组合同轴展示；覆盖率不足 95% 时基准与超额一律显示 —。不计手续费、印花税与滑点。
-        结果用于评估组合综合选股能力，不构成任何投资建议。
+        结果用于评估组合综合排名能力，不构成任何投资建议。
       </div>
     </div>
   );

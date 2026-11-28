@@ -4,20 +4,19 @@
  * 版面为「顶栏状态带 + 四工作区」：
  *   顶栏   = 页面身份 + 工作区切换 + 截面模型选型
  *   状态带 = 市场 · 数据基准日与陈旧度 · 预测交易日 · 模型/榜行数 · 预检结论
- *   工作区 = 单票研判（主从双栏）/ 截面选股（全宽榜）/ 模型治理（资产体检）/
+ *   工作区 = 单票研判（主从双栏）/ 截面排名（全宽榜）/ 模型治理（资产体检）/
  *            晋升流程（rollout 台账：回放评估 → 观察期 → 晋升/回滚，P2 §5.3）
  *
  * 四个工作区共享同一份 hook 状态（模型选型、基准日、已选标的、预检结论），
- * 切换不丢上下文：在截面榜点一行 → 切到单票研判并直接出该股预测。
- *
+ * 切换不丢上下文：在截面榜点一行 → 切到单票研判并直接出该股预测。 *
  * 窄屏（<1280，主要出现在 Web 而非 Electron：Electron 窗口 minWidth 1440）
  * 只有「单票研判」需要退化：右侧工作台改由抽屉承载；另三个工作区本就是单列。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Select, Tag, Drawer, Tooltip, Typography } from 'antd';
+import { Select, Tag, Drawer, Tooltip, Typography, Switch } from 'antd';
 import { clsx } from 'clsx';
-import { Cpu, Database, Star, Layers, TrendingUp } from 'lucide-react';
+import { Cpu, Database, Star, Layers, TrendingUp, ShieldOff } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useInferenceCenter } from '../adapter';
 import { ComplianceStrip } from '../../../components/shared/compliance/ComplianceChrome';
@@ -43,8 +42,12 @@ import type { StockPoolOption } from '../../../services/stockPoolOptionService';
 import type { InferenceRankingItem, UserModelRecord } from '../../../services/modelTrainingService';
 import { extractModelType, modelDisplayName } from '../../../pages/modelRegistryUtils';
 import { MarketSelector } from '../../../components/layout/MarketSelector';
+import { tradingBlacklistService } from '../../trading-blacklist/service';
 
 const { Text } = Typography;
+
+/** 推理中心「排除黑名单」开关的本地记忆（跨工作区/刷新保持） */
+const EXCLUDE_BLACKLIST_KEY = 'qm.inference.excludeBlacklist';
 
 /** 低于此宽度不再并排，右侧工作台改抽屉（Electron 窗口 minWidth 1440，正常不会触发） */
 const NARROW_BREAKPOINT = 1280;
@@ -71,7 +74,54 @@ export const InferenceCenterShell: React.FC = () => {
   // 深链：外部可带 state.modelId 预选截面模型（旧版还有一个永远取不到 individual 的 tab 分支，已移除）
   const initialModelId = (location.state as any)?.modelId || '';
 
-  const cs = useCrossSectionInference(market, calendar, initialModelId);
+  // 推理中心「排除黑名单」：一份全局开关，截面榜 / 单票 / 组合榜共用同一口径。
+  // 黑名单只有 A 股一份（后台管理·交易核心维护），其它市场不渲染该开关。
+  const [excludeBlacklist, setExcludeBlacklist] = useState(
+    () =>
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem(EXCLUDE_BLACKLIST_KEY) === '1',
+  );
+  const [blacklistSymbols, setBlacklistSymbols] = useState<{
+    asof: string | null;
+    imported: boolean;
+    reason?: string;
+    symbols: Set<string>;
+  } | null>(null);
+  const toggleExcludeBlacklist = useCallback((checked: boolean) => {
+    setExcludeBlacklist(checked);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(EXCLUDE_BLACKLIST_KEY, checked ? '1' : '0');
+    }
+  }, []);
+  useEffect(() => {
+    if (!excludeBlacklist || market !== 'CN') {
+      setBlacklistSymbols(null);
+      return;
+    }
+    let cancelled = false;
+    tradingBlacklistService
+      .blockingSymbols('CN')
+      .then((data) => {
+        if (cancelled) return;
+        setBlacklistSymbols({
+          asof: data.asof,
+          imported: data.imported,
+          reason: data.reason,
+          symbols: new Set(data.symbols ?? []),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBlacklistSymbols({ asof: null, imported: false, symbols: new Set() });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [excludeBlacklist, market]);
+
+  const blacklistActive = excludeBlacklist && market === 'CN';
+  const cs = useCrossSectionInference(market, calendar, initialModelId, blacklistActive);
   const ip = useIndividualPrediction(adapter);
 
   const isNarrow = useIsNarrow(NARROW_BREAKPOINT);
@@ -79,7 +129,7 @@ export const InferenceCenterShell: React.FC = () => {
   const [governanceView, setGovernanceView] = useState<'assets' | 'neutralization'>('assets');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [poolPickerOpen, setPoolPickerOpen] = useState(false);
-  /** 治理面板「组合选股」→ 组合工作区：带过去的模型选择（nonce 触发构建器预填） */
+  /** 治理面板「组合排名」→ 组合工作区：带过去的模型选择（nonce 触发构建器预填） */
   const [comboSeed, setComboSeed] = useState<{ modelIds: string[]; nonce: number } | null>(null);
   // 晋升台账「进行中」角标：由面板在加载/操作后回报（面板未挂载过则无角标——
   // 与其在壳里再拉一份容易过期的列表，不如等首次进入后面板自己报数）
@@ -177,7 +227,7 @@ export const InferenceCenterShell: React.FC = () => {
     [availableSingleModels, ip],
   );
 
-  /** 治理面板多选 → 组合选股：切工作区并把已选模型交给构建器预填 */
+  /** 治理面板多选 → 组合排名：切工作区并把已选模型交给构建器预填 */
   const handleOpenCombo = useCallback((modelIds: string[]) => {
     setComboSeed({ modelIds, nonce: Date.now() });
     setWorkspace('combo');
@@ -191,6 +241,16 @@ export const InferenceCenterShell: React.FC = () => {
 
   const rankingCount = cs.ranking?.rankings?.length ?? 0;
 
+  // 单票命中黑名单：开关打开 + 名单已导入 + 后缀式代码命中，才出红色口径提示
+  const selectedSuffix = ip.symbol ? adapter.toSuffixSymbol(ip.symbol) : '';
+  const blacklistAsOf =
+    blacklistActive &&
+    blacklistSymbols?.imported &&
+    selectedSuffix &&
+    blacklistSymbols.symbols.has(selectedSuffix)
+      ? blacklistSymbols.asof
+      : null;
+
   const workbench = (
     <IndividualWorkbench
       ip={ip}
@@ -198,6 +258,8 @@ export const InferenceCenterShell: React.FC = () => {
       searchPlaceholder={adapter.searchPlaceholder}
       suggestionLabel={adapter.suggestionLabel}
       toSuffixSymbol={adapter.toSuffixSymbol}
+      excludeBlacklist={blacklistActive}
+      blacklistAsOf={blacklistAsOf}
     />
   );
 
@@ -279,7 +341,7 @@ export const InferenceCenterShell: React.FC = () => {
           />
         </div>
 
-        {/* 截面模型选型只对「单票研判 / 截面选股」有意义：两个工作区共用这一份上下文
+        {/* 截面模型选型只对「单票研判 / 截面排名」有意义：两个工作区共用这一份上下文
             （治理/晋升是资产审视面，不随截面选型走） */}
         {cs.selectedModel &&
           workspace !== 'combo' &&
@@ -333,6 +395,33 @@ export const InferenceCenterShell: React.FC = () => {
                 ) : '非默认模型'}
               </span>
             </div>
+          </div>
+        )}
+
+        {market === 'CN' && ['single', 'cross', 'combo'].includes(workspace) && (
+          <div className="flex items-center gap-2 shrink-0 pl-2 border-l border-slate-200">
+            <Tooltip title="截面排名 / 组合排名按交易黑名单剔除（跳过并顺延补足）；单票命中时只做研究提示。名单在「后台管理 → 交易核心」维护。">
+              <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600 cursor-pointer whitespace-nowrap">
+                <ShieldOff size={13} className={excludeBlacklist ? 'text-rose-500' : 'text-slate-400'} />
+                排除黑名单
+                <Switch
+                  size="small"
+                  checked={excludeBlacklist}
+                  onChange={toggleExcludeBlacklist}
+                />
+              </label>
+            </Tooltip>
+            {excludeBlacklist && blacklistSymbols ? (
+              blacklistSymbols.imported ? (
+                <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
+                  {blacklistSymbols.symbols.size} 只 · {blacklistSymbols.asof || '—'}
+                </span>
+              ) : (
+                <span className="text-[10px] text-amber-600 font-bold whitespace-nowrap">
+                  名单未导入
+                </span>
+              )
+            ) : null}
           </div>
         )}
 
@@ -421,6 +510,7 @@ export const InferenceCenterShell: React.FC = () => {
           horizonDays={cs.horizonDays}
           market={market}
           marketLabel={marketLabel}
+          excludeBlacklist={blacklistActive}
         />
       )}
 
@@ -430,6 +520,7 @@ export const InferenceCenterShell: React.FC = () => {
           marketLabel={marketLabel}
           seedModelIds={comboSeed?.modelIds}
           seedNonce={comboSeed?.nonce}
+          excludeBlacklist={blacklistActive}
         />
       )}
 

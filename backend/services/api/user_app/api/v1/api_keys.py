@@ -71,7 +71,7 @@ async def init_default_api_key(current_user: dict = Depends(get_current_user)):
     """
     幂等接口：若该用户尚无 API Key，则自动创建一个名为"交易系统默认Key"的 Key。
     若已存在，则返回最新的一条 Key 的 access_key（secret_key 不再返回）。
-    前端在用户首次进入"设置中心"时调用此接口。
+    前端在管理员进入「后台管理 → 系统设置 → SDK 接入凭证」时调用此接口。
     """
     user_id = current_user["user_id"]
     tenant_id = current_user["tenant_id"]
@@ -87,7 +87,13 @@ async def init_default_api_key(current_user: dict = Depends(get_current_user)):
         # 2. 不存在，自动生成默认 Key
         create_data = ApiKeyCreate(
             name="交易系统默认Key",
-            permissions=["trade.read", "trade.write"],
+            permissions=[
+                "mcp.use",
+                "mcp.data.read",
+                "mcp.control.read",
+                "trade.read",
+                "trade.write",
+            ],
         )
         created = await service.create_api_key(user_id=user_id, tenant_id=tenant_id, data=create_data)
         # 返回 ApiKeyInfo（不含 secret_key 明文，前端只需显示 access_key）

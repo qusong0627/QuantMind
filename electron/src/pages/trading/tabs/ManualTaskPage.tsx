@@ -1,13 +1,9 @@
 import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ClipboardList, Search, Zap, BarChart3, User as UserIcon, Settings2, Sparkles, Filter, Link, ArrowRight, Layers, History, Cpu, Clock, Brain, Target, Database, Calendar, Wand2, Eye, TerminalSquare } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ClipboardList, Search, Zap, BarChart3, User as UserIcon, Settings2, Filter, Link, ArrowRight, Layers, History, Cpu, Brain, Wand2, Eye, TerminalSquare } from 'lucide-react';
 import { DatePicker, Empty, Input, Select, Spin, Tag, message, Tooltip, Badge } from 'antd';
 import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc';
-import timezone from 'dayjs/plugin/timezone';
-dayjs.extend(utc);
-dayjs.extend(timezone);
 import { strategyManagementService } from '../../../services/strategyManagementService';
 import { sortTradingStrategies } from '../utils/sortTradingStrategies';
 import { filterStrategiesByMarket } from '../utils/strategyMarket';
@@ -17,12 +13,9 @@ import {
     type InferenceRunRecord,
     type UserModelRecord,
 } from '../../../services/modelTrainingService';
-import { 
-    getMeta, 
-    getMetrics, 
-    resolveMetricNumber, 
-    extractModelType, 
-} from '../../modelRegistryUtils';
+import { getMeta, extractModelType } from '../../modelRegistryUtils';
+// 右侧模型详情直接复用模型管理的「模型详情」页，口径与样式同源（用户 2026-11-28 口径）。
+import { ModelDetailPanel } from '../../modelRegistryPanels';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import type {
     ManualExecutionLogEntry,
@@ -63,48 +56,6 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed']);
 const loadRealTradingService = async () => {
     const module = await import('../../../services/realTradingService');
     return module.realTradingService;
-};
-
-/** 解析训练窗口范围字符串 (格式: "2020-01-01 -> 2020-12-31 | ...") */
-const parseTrainingWindowRanges = (raw: unknown): Array<[string, string]> => {
-    if (typeof raw !== 'string' || !raw.trim()) return [];
-    const text = raw.replaceAll('→', '->').replaceAll('—', '-');
-    const segments = text.split('|').map((item) => item.trim()).filter(Boolean);
-    const ranges: Array<[string, string]> = [];
-    for (const segment of segments) {
-        const matched = segment.match(/(\d{4}-\d{2}-\d{2})\s*->\s*(\d{4}-\d{2}-\d{2})/);
-        if (matched) {
-            ranges.push([matched[1], matched[2]]);
-        }
-    }
-    return ranges;
-};
-
-/** 从元数据中提取时间周期 */
-const extractTimePeriods = (meta: Record<string, any>) => {
-    const windowRanges = parseTrainingWindowRanges(meta.training_window ?? meta.trainingWindow);
-    const ts = meta.train_start ?? meta.trainStart ?? windowRanges[0]?.[0];
-    const te = meta.train_end ?? meta.trainEnd ?? windowRanges[0]?.[1];
-    if (!ts || !te) return null;
-    const vs = meta.val_start ?? meta.valStart ?? windowRanges[1]?.[0];
-    const ve = meta.val_end ?? meta.valEnd ?? windowRanges[1]?.[1];
-    const xs = meta.test_start ?? meta.testStart ?? windowRanges[2]?.[0];
-    const xe = meta.test_end ?? meta.testEnd ?? windowRanges[2]?.[1];
-    return {
-        train: [String(ts).slice(0, 10), String(te).slice(0, 10)] as [string, string],
-        val: vs && ve ? [String(vs).slice(0, 10), String(ve).slice(0, 10)] as [string, string] : null,
-        test: xs && xe ? [String(xs).slice(0, 10), String(xe).slice(0, 10)] as [string, string] : null,
-    };
-};
-
-/** 将 UTC 无时区后缀的时间字符串转为上海时区显示 */
-const toShanghaiTime = (raw?: string | null): string => {
-    if (!raw) return '-';
-    try {
-        return dayjs.utc(raw).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss');
-    } catch {
-        return raw;
-    }
 };
 
 const STAGE_LABELS: Record<string, string> = {
@@ -183,8 +134,8 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
     }, [userModels, modelSearch]);
 
     const selectedModelObject = useMemo(() => {
-        return filteredModelOptions.find(m => m.model_id === effectiveModelId) || null;
-    }, [effectiveModelId, filteredModelOptions]);
+        return userModels.find(m => m.model_id === effectiveModelId) || null;
+    }, [effectiveModelId, userModels]);
 
     const filteredStrategyOptions = useMemo(() => {
         const q = strategySearch.toLowerCase().trim();
@@ -577,9 +528,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
             <div className="rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
                 {currentStep === 0 ? (
                     <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
-                        <div className="flex flex-col lg:flex-row h-[520px] bg-white border border-gray-100 rounded-2xl overflow-hidden shadow-sm">
+                        {/* 模型列表定高内部滚动；右侧模型详情随页面滚动（模型管理同款页面很高，
+                            再塞进 520px 定高盒子里只能看到图表上沿） */}
+                        <div className="flex flex-col lg:flex-row lg:items-start bg-white border border-gray-100 rounded-2xl shadow-sm">
                             {/* 左侧：模型列表 */}
-                            <div className="w-full lg:w-[320px] flex flex-col border-r border-gray-100 bg-gray-50/20">
+                            <div className="w-full lg:w-[320px] shrink-0 flex flex-col border-b lg:border-b-0 lg:border-r border-gray-100 bg-gray-50/20 lg:sticky lg:top-0 lg:max-h-[calc(100vh-10rem)] rounded-t-2xl lg:rounded-l-2xl">
                                 <div className="p-4 border-b border-gray-100">
                                     <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2 mb-3">
                                         <Layers size={14} className="text-blue-600" />
@@ -655,200 +608,24 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                 </div>
                             </div>
 
-                            {/* 右侧：监控面板与核心指标 */}
-                            <div className="flex-1 flex flex-col bg-white overflow-hidden">
+                            {/* 右侧：模型详情（直接复用模型管理的「模型详情」页，口径与样式同源；
+                                2026-11-28 用户口径：原来自绘的模型能力面板不要了） */}
+                            <div className="flex-1 min-w-0 bg-white p-4">
                                 {selectedModelObject ? (
-                                    <div className="flex-1 p-6 overflow-y-auto custom-scrollbar">
-                                        {/* 内容块整体水平居中，内部元素统一居中对齐 */}
-                                        <div className="mx-auto w-full max-w-3xl flex flex-col min-h-full">
-                                        <div className="flex flex-col items-center text-center mb-6">
-                                            <div className="flex flex-wrap items-center justify-center gap-2 mb-1">
-                                                <h2 className="text-xl font-bold text-gray-900">
-                                                    {modelDisplayName(selectedModelObject as any)}
-                                                </h2>
-                                                <Tag color="blue" bordered={false} className="m-0 text-[10px] font-black rounded-md px-2 py-0.5 uppercase tracking-wider">
-                                                    {extractModelType(selectedModelObject as any)}
-                                                </Tag>
-                                                <Tag color="default" bordered={false} className="m-0 text-[10px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-gray-100 text-gray-500">
-                                                    {String(getMeta(selectedModelObject as any).data_source || '全局数据')}
-                                                </Tag>
-                                                <Tag color="purple" bordered={false} className="m-0 text-[10px] font-bold rounded-md px-2 py-0.5 uppercase tracking-wider bg-purple-50 text-purple-600">
-                                                    {String(getMeta(selectedModelObject as any).freq || 'Daily')}
-                                                </Tag>
-                                            </div>
-                                            <div className="text-xs text-gray-400 font-mono flex flex-wrap items-center justify-center gap-2">
-                                                <span className="bg-gray-50 px-1.5 py-0.5 rounded text-gray-500 border border-gray-100">{selectedModelObject.model_id}</span>
-                                                <span>创建于 {dayjs(selectedModelObject.created_at).format('YYYY-MM-DD')}</span>
-                                                <span className="text-gray-200">|</span>
-                                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{String(getMeta(selectedModelObject as any).version || 'v1.0.0')}</span>
-                                            </div>
-                                            <div className="flex flex-col items-center gap-1.5 mt-3">
-                                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">当前状态</div>
-                                                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-100 rounded-full">
-                                                    <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                                                    <span className="text-[10px] font-bold text-emerald-600 uppercase">Deployed / Ready</span>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        {/* 预测目标横幅 */}
-                                        {(() => {
-                                            const meta = getMeta(selectedModelObject as any);
-                                            const formula = meta.label || meta.target_label || meta.formula;
-                                            if (!formula) return null;
-                                            return (
-                                                <div className="mb-6 p-3 rounded-xl bg-slate-900 border border-slate-800 shadow-inner group transition-all hover:bg-slate-800">
-                                                    <div className="flex items-center justify-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">
-                                                        <Target size={12} className="text-blue-400" />
-                                                        预测目标 (Target Factor Formula)
-                                                    </div>
-                                                    <code className="block text-center text-[11px] font-mono font-bold text-blue-300 break-all leading-relaxed">
-                                                        {String(formula)}
-                                                    </code>
-                                                </div>
-                                            );
-                                        })()}
-
-                                        <div className="grid grid-cols-3 gap-3 mb-6">
-                                            {(() => {
-                                                const metricsData = getMetrics(selectedModelObject as any);
-                                                
-                                                const icVal = resolveMetricNumber(metricsData, ['ic', 'test_ic', 'val_ic', 'IC', 'mean_ic', 'train_ic']);
-                                                const icirVal = resolveMetricNumber(metricsData, ['icir', 'test_rank_icir', 'val_rank_icir', 'test_icir', 'val_icir', 'ICIR', 'IC_IR', 'rank_icir', 'train_rank_icir']);
-                                                const rankIcVal = resolveMetricNumber(metricsData, ['rank_ic', 'test_rank_ic', 'val_rank_ic', 'Rank_IC', 'rankIC', 'train_rank_ic']);
-                                                
-                                                return (
-                                                    <>
-                                                        <div className="rounded-2xl bg-blue-50/50 border border-blue-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1">平均 IC</div>
-                                                            <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
-                                                                {icVal?.toFixed(4) || '0.0000'}
-                                                            </div>
-                                                        </div>
-
-                                                        <div className="rounded-2xl bg-indigo-50/50 border border-indigo-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest mb-1">Rank IC</div>
-                                                            <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
-                                                                {rankIcVal?.toFixed(4) || icVal?.toFixed(4) || '0.0000'}
-                                                            </div>
-                                                        </div>
-
-                                                        <div className="rounded-2xl bg-emerald-50/50 border border-emerald-100/50 p-4 text-center">
-                                                            <div className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest mb-1">ICIR (稳定度)</div>
-                                                            <div className="text-xl font-black text-slate-800 font-mono tracking-tighter">
-                                                                {icirVal?.toFixed(3) || '0.000'}
-                                                            </div>
-                                                        </div>
-                                                    </>
-                                                );
-                                            })()}
-                                        </div>
-
-                                        <div className="space-y-4">
-                                            {/* 模型属性清单 */}
-                                            <div className="grid grid-cols-2 gap-4">
-                                                {/* 特征因子预览 */}
-                                                {(() => {
-                                                    const meta = getMeta(selectedModelObject as any);
-                                                    const features = (meta.features || []) as string[];
-                                                    if (features.length === 0) return null;
-                                                    return (
-                                                        <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/60 overflow-hidden flex flex-col">
-                                                            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
-                                                                <Database size={12} className="text-blue-500" />
-                                                                特征因子 (Top 5)
-                                                            </div>
-                                                            <div className="flex flex-wrap justify-center gap-1.5">
-                                                                {features.slice(0, 5).map(f => (
-                                                                    <span key={f} className="px-2 py-0.5 rounded-md bg-white border border-slate-100 text-[10px] font-mono text-slate-600 font-bold truncate max-w-full">
-                                                                        {f}
-                                                                    </span>
-                                                                ))}
-                                                                {features.length > 5 && (
-                                                                    <span className="text-[10px] text-slate-300 font-bold">+{features.length - 5}</span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })()}
-
-                                                {/* 时间窗口可视化 */}
-                                                {(() => {
-                                                    const periods = extractTimePeriods(getMeta(selectedModelObject as any));
-                                                    if (!periods) return null;
-                                                    return (
-                                                        <div className="p-4 rounded-2xl bg-indigo-50/20 border border-indigo-100/50">
-                                                            <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest mb-3 flex items-center justify-center gap-2">
-                                                                <Calendar size={12} />
-                                                                数据周期
-                                                            </div>
-                                                            <div className="space-y-2">
-                                                                <div className="flex items-center justify-center gap-3">
-                                                                    <span className="text-[9px] font-bold text-slate-400 uppercase">训练</span>
-                                                                    <span className="text-[10px] font-mono text-blue-700 font-black">{periods.train[0].slice(2)} → {periods.train[1].slice(2)}</span>
-                                                                </div>
-                                                                {periods.test && (
-                                                                    <div className="flex items-center justify-center gap-3">
-                                                                        <span className="text-[9px] font-bold text-slate-400 uppercase">测试</span>
-                                                                        <span className="text-[10px] font-mono text-emerald-700 font-black">{periods.test[0].slice(2)} → {periods.test[1].slice(2)}</span>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })()}
-                                            </div>
-
-                                            <div className="p-4 rounded-2xl bg-gray-50/50 border border-gray-100">
-                                                <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 flex items-center justify-center gap-2">
-                                                    <Search size={12} />
-                                                    模型描述与适用场景
-                                                </div>
-                                                <div className="text-[11px] text-gray-600 leading-relaxed italic text-center">
-                                                    {String(getMeta(selectedModelObject as any).description || '暂无详细描述。该模型专为 A 股市场 T+N 调仓场景设计，采用了 Qlib 工业级特征工程，在回测期内表现稳健。')}
-                                                </div>
-                                            </div>
-
-                                            <div className="grid grid-cols-2 gap-3">
-                                                <div className="flex flex-col items-center gap-1.5">
-                                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">特征维度</span>
-                                                    <div className="text-xs font-bold text-gray-800 flex items-center gap-2">
-                                                        <Cpu size={14} className="text-blue-500" />
-                                                        {(() => {
-                                                            const meta = getMeta(selectedModelObject as any);
-                                                            return Number(meta.feature_count ?? meta.features?.length ?? 0);
-                                                        })()} 维
-                                                    </div>
-                                                </div>
-                                                <div className="flex flex-col items-center gap-1.5">
-                                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">预测周期</span>
-                                                    <div className="text-xs font-bold text-gray-800 flex items-center gap-2">
-                                                        <Clock size={14} className="text-amber-500" />
-                                                        T+{(() => {
-                                                            const meta = getMeta(selectedModelObject as any);
-                                                            return Number(meta.target_horizon_days ?? meta.horizon_days ?? 5);
-                                                        })()} 天
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="mt-auto pt-6 border-t border-gray-50 flex items-center justify-center">
-                                            <div className="flex items-center gap-2">
-                                                <Sparkles className="text-amber-400" size={16} />
-                                                <p className="text-[11px] text-gray-400 font-medium">只有处于 READY 状态的模型可产生有效信号</p>
-                                            </div>
-                                        </div>
-                                        </div>
-                                    </div>
+                                    <ModelDetailPanel
+                                        model={selectedModelObject}
+                                        allModels={userModels}
+                                        onSelectModel={(modelId) => resetDownstreamFromModel(modelId)}
+                                    />
                                 ) : (
-                                    <div className="flex-1 flex flex-col items-center justify-center text-center p-12 space-y-4">
+                                    <div className="flex min-h-[420px] flex-col items-center justify-center text-center p-12 space-y-4">
                                         <div className="w-20 h-20 rounded-3xl bg-gray-50 flex items-center justify-center text-gray-200">
                                             <Brain size={40} />
                                         </div>
                                         <div>
                                             <h3 className="font-bold text-gray-900">请选择左侧模型</h3>
                                             <p className="text-xs text-gray-400 mt-1 max-w-[240px]">
-                                                选择一个推理模型以查看其详细性能指标与运行轨迹。
+                                                选择一个推理模型以查看其训练指标、特征工程与实盘表现。
                                             </p>
                                         </div>
                                     </div>

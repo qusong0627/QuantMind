@@ -191,6 +191,7 @@ async def fetch_json(
     params: dict[str, Any] | None = None,
     timeout: float | None = None,
     admin: bool = False,
+    raw: bool = False,
 ) -> Any:
     """调用上游并（可选）把响应解析成有类型的模型。
 
@@ -249,7 +250,7 @@ async def fetch_json(
         detail = _extract_detail(response)
         raise HTTPException(status_code=response.status_code, detail=detail)
 
-    if model is None and list_model is None:
+    if model is None and list_model is None and not raw:
         # 调用方只要「成了」，不关心响应体（`cancel` 之类）。
         return None
 
@@ -260,6 +261,9 @@ async def fetch_json(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="upstream_malformed_response",
         ) from exc
+
+    if raw:
+        return payload
 
     try:
         if list_model is not None:

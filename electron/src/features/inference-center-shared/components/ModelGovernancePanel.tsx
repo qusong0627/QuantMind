@@ -130,7 +130,7 @@ interface ModelGovernancePanelProps {
   marketLabel: string;
   /** 点行 → 跳到单票研判并预选该模型 */
   onInspect?: (model: UserModelRecord) => void;
-  /** 勾选模型 → 带种子跳到组合选股工作区（P5 接入） */
+  /** 勾选模型 → 带种子跳到组合排名工作区（P5 接入） */
   onOpenCombo?: (modelIds: string[]) => void;
   /** 补推任务终结后通知父级刷新模型列表 */
   onBackfillFinished?: () => void;
@@ -423,7 +423,7 @@ export const ModelGovernancePanel: React.FC<ModelGovernancePanelProps> = ({
                 title={
                   selectedKeys.length < 2
                     ? '至少选择 2 个模型'
-                    : '带所选模型跳到组合选股（同特征多模型融合）'
+                    : '带所选模型跳到组合排名（同特征多模型融合）'
                 }
               >
                 <Button
@@ -432,7 +432,7 @@ export const ModelGovernancePanel: React.FC<ModelGovernancePanelProps> = ({
                   disabled={selectedKeys.length < 2}
                   onClick={() => onOpenCombo(selectedKeys.map(String))}
                 >
-                  组合选股
+                  组合排名
                 </Button>
               </Tooltip>
             )}

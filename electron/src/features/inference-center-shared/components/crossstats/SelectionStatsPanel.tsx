@@ -1,5 +1,5 @@
 /**
- * 截面选股 · 单模型 Top50 历史统计（测试集）。
+ * 截面排名 · 单模型 Top50 历史统计（测试集）。
  *
  * 用户口径（2026-10-21）：
  * - 用**测试集**（pred.parquet 的 split=test）评估单个模型的选股能力；
@@ -78,6 +78,8 @@ export interface SelectionStatsPanelProps {
   horizonDays: number;
   market: string;
   marketLabel?: string;
+  /** 推理中心「排除黑名单」开关：历史统计同样按黑名单剔除入选标的 */
+  excludeBlacklist?: boolean;
 }
 
 export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
@@ -85,10 +87,11 @@ export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
   horizonDays,
   market,
   marketLabel,
+  excludeBlacklist = false,
 }) => {
   // 非 A 股市场直接不给 hook 模型，避免明知不支持还发请求
   const isSupportedMarket = !market || market === 'CN';
-  const state = useSelectionStats(isSupportedMarket ? modelId : null);
+  const state = useSelectionStats(isSupportedMarket ? modelId : null, excludeBlacklist);
   const [mode, setMode] = useState<SelectionHoldMode>('period');
   const [topK, setTopK] = useState<number | null>(DEFAULT_TOP_K);
   const [capitalWan, setCapitalWan] = useState<number | null>(DEFAULT_CAPITAL_WAN);
@@ -349,7 +352,7 @@ export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
   if (!modelId) {
     return (
       <div className="h-full flex items-center justify-center bg-white border border-slate-200 rounded-xl">
-        <Empty description="先在上方选择模型，再统计其测试集历史选股能力" />
+        <Empty description="先在上方选择模型，再统计其测试集历史排名能力" />
       </div>
     );
   }
@@ -375,7 +378,7 @@ export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
   if (state.loading && !stats) {
     return (
       <div className="h-full min-h-0 min-w-0 flex items-center justify-center bg-white border border-slate-200 rounded-xl">
-        <Spin tip="读取测试集评分与前复权收盘价，滚动计算历史选股…" />
+        <Spin tip="读取测试集评分与前复权收盘价，滚动计算历史排名…" />
       </div>
     );
   }
@@ -578,7 +581,7 @@ export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
       <div className="flex-1 min-h-0 overflow-auto overscroll-contain p-3 space-y-3">
         {!stats || !summary ? (
           <div className="h-full flex items-center justify-center">
-            <Empty description="选好换股节奏与区间后点「计算」，统计该模型测试集的历史选股能力" />
+            <Empty description="选好换股节奏与区间后点「计算」，统计该模型测试集的历史排名能力" />
           </div>
         ) : (
           <>
@@ -669,7 +672,7 @@ export const SelectionStatsPanel: React.FC<SelectionStatsPanelProps> = ({
         {stats?.requested.hold_days ?? Math.max(1, horizonDays || 1)}{' '}
         个交易日收盘退出（每日滚动 = 1 日）；每期全部权益等权投入，期与期首尾相接复利滚动。前复权收盘价，
         不计手续费、印花税与滑点，不建模停牌/涨跌停等不可交易状态；缺失价格不按 0 计。
-        结果用于评估模型历史选股能力，不构成任何投资建议。
+        结果用于评估模型历史排名能力，不构成任何投资建议。
       </div>
     </div>
   );

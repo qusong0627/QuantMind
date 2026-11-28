@@ -40,7 +40,7 @@ export interface ComboBuilderModalProps {
   open: boolean;
   market: string;
   marketLabel: string;
-  /** 治理面板「组合选股」带入的模型（可跨组，需用户自行收敛） */
+  /** 治理面板「组合排名」带入的模型（可跨组，需用户自行收敛） */
   initialModelIds?: string[];
   /** 从模板保存为组合：预填成员与参数 */
   initialTemplate?: ComboTemplate | null;

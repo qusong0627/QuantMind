@@ -183,6 +183,14 @@ _ALLOWED_EXT_ENDPOINTS: tuple[str, ...] = (
     f"{EXT_API}/control/models",
     # 任务面（批次 4）的「有哪些任务种类」。提交/查询带参数，走下面的模式表。
     f"{EXT_API}/task/kinds",
+    # MCP 支撑面（v1）：配置下发 + 审计上报；MCP 服务不是交易面
+    f"{EXT_API}/mcp/config",
+    f"{EXT_API}/mcp/audit",
+    # 有界数据查询（MCP v1；只读）
+    f"{EXT_API}/data/query",
+    # MCP v2 推理只读（不碰交易）
+    f"{EXT_API}/inference/rankings",
+    f"{EXT_API}/inference/stock-score",
 )
 
 #: 带**路径参数**的对外端点。上面那张表是精确相等，表达不了
@@ -203,6 +211,7 @@ _ALLOWED_EXT_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     # 单文件数据集
     re.compile(rf"{EXT_API}/data/datasets/[a-z0-9_]+/blob"),
+    re.compile(rf"{EXT_API}/data/datasets/[a-z0-9_]+/schema"),
     # 行级增量（游标）——**不碰交易**，所以放行；放行的是「读」，不是「下单」
     re.compile(rf"{EXT_API}/data/[a-z0-9_]+/changes"),
     # 任务面：提交 / 查状态。`{kind}` 是窄字符类（它只会是 `train` 这类

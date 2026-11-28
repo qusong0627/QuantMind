@@ -2,8 +2,8 @@
  * 模型治理面板的多选入口（P4）。
  *
  * 钉住：
- * 1) 勾选后工具条才出现；<2 个模型时「一键推理」「组合选股」都禁用（后端契约 min 2）；
- * 2) 组合选股把勾选的 model_id 交给父级（P5 用它切工作区并带种子）；
+ * 1) 勾选后工具条才出现；<2 个模型时「一键推理」「组合排名」都禁用（后端契约 min 2）；
+ * 2) 组合排名把勾选的 model_id 交给父级（P5 用它切工作区并带种子）；
  * 3) 勾选框不触发「点行 → 单票研判」；
  * 4) 切市场清空选择，避免跨市场种子被带进补推/组合。
  */
@@ -85,7 +85,7 @@ beforeEach(() => {
 });
 
 describe('ModelGovernancePanel 多选', () => {
-  it('未勾选不显示工具条；勾选 2 个后可一键推理与组合选股', async () => {
+  it('未勾选不显示工具条；勾选 2 个后可一键推理与组合排名', async () => {
     const onOpenCombo = vi.fn();
     render(
       <ModelGovernancePanel
@@ -101,14 +101,14 @@ describe('ModelGovernancePanel 多选', () => {
     await selectRows(1);
     expect(screen.getByTestId('governance-selection-bar').textContent).toContain('已选 1 个模型');
     expect(screen.getByRole('button', { name: /一键推理至最新/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /组合选股/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /组合排名/ })).toBeDisabled();
 
     await selectRows(1, 1);
     expect(screen.getByTestId('governance-selection-bar').textContent).toContain('已选 2 个模型');
     expect(screen.getByRole('button', { name: /一键推理至最新/ })).toBeEnabled();
-    expect(screen.getByRole('button', { name: /组合选股/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /组合排名/ })).toBeEnabled();
 
-    await userEvent.click(screen.getByRole('button', { name: /组合选股/ }));
+    await userEvent.click(screen.getByRole('button', { name: /组合排名/ }));
     expect(onOpenCombo).toHaveBeenCalledWith(['m1', 'm2']);
   });
 

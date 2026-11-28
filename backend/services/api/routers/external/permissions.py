@@ -48,6 +48,7 @@ from backend.services.api.routers.external.auth import (
     ExternalPrincipal,
     require_external_principal,
 )
+from backend.shared.mcp_tool_catalog import MCP_INFERENCE_READ
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ GATED_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("GET", "/api/ext/v1/trading/sim/trades"),
     ("POST", "/api/ext/v1/trading/sim/orders"),
     ("POST", "/api/ext/v1/trading/sim/orders/{order_id}/cancel"),
+    # MCP v2 推理只读（2026-11-28）
+    ("GET", "/api/ext/v1/inference/rankings"),
+    ("GET", "/api/ext/v1/inference/stock-score"),
 )
 
 #: 每个受关端点的权限码要求。`{order_id}` 这类参数位在判定时是具体值，
@@ -85,6 +89,8 @@ GATED_REQUIREMENTS: dict[tuple[str, str], str] = {
     ("GET", "/api/ext/v1/trading/sim/trades"): PERMISSION_TRADE_READ,
     ("POST", "/api/ext/v1/trading/sim/orders"): PERMISSION_TRADE_WRITE,
     ("POST", "/api/ext/v1/trading/sim/orders/{order_id}/cancel"): PERMISSION_TRADE_WRITE,
+    ("GET", "/api/ext/v1/inference/rankings"): MCP_INFERENCE_READ,
+    ("GET", "/api/ext/v1/inference/stock-score"): MCP_INFERENCE_READ,
 }
 
 

@@ -94,6 +94,28 @@ def test_list_reports_not_imported_distinctly(client, root):
     assert "未导入" in body["data"]["reason"]
 
 
+def test_symbols_endpoint_returns_blocking_set(client, root):
+    """推理中心开关用的代码集合：只回生效（blocking）代码，后缀式。"""
+    _baseline(root)
+
+    body = client.get(f"{PREFIX}/symbols").json()
+
+    assert body["success"] is True
+    data = body["data"]
+    assert data["imported"] is True
+    assert data["asof"] == "2026-09-18"
+    assert data["count"] == len(data["symbols"]) == 1
+    assert data["symbols"] == ["600606.SH"]
+
+
+def test_symbols_endpoint_reports_not_imported(client, root):
+    body = client.get(f"{PREFIX}/symbols").json()
+
+    assert body["data"]["imported"] is False
+    assert body["data"]["count"] == 0
+    assert "未导入" in body["data"]["reason"]
+
+
 def test_list_returns_envelope_and_rows(client, root):
     """信封 {success, data{items}} + 行内带来源与本人改动槽位。"""
     # Arrange
@@ -288,7 +310,7 @@ def test_meta_endpoint_reports_both_layers(client, root):
     assert data["imported"] is True
     assert data["meta"]["asof"] == "2026-09-18"
     assert data["overlay"]["counts"]["block"] == 1
-    assert data["sources"]["user_manual"]["label"] == "手工排除（本人在个人中心添加）"
+    assert data["sources"]["user_manual"]["label"] == "手工排除（后台管理·交易核心添加）"
 
 
 # ---------------------------------------------------------------------------

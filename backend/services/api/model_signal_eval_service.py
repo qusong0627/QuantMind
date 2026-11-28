@@ -14,6 +14,11 @@ T+1 收盘 → T+H 收盘（模型训练口径），窗口末端取最后一个�
 - ``ui_3m.json``：评估结果（原子写）
 - ``ui_3m.status.json``：running/done/error + progress
 - ``ui_3m.lock``：文件锁，防多 worker 重复计算
+
+TopN 有两种口径：默认按全样本选前 N；``exclude_blacklist=True`` 时按后台管理的
+交易黑名单逐只跳过、由后一名顺延补足（模拟实盘候选池），报告/状态/锁/历史快照
+都落在带 ``_excl`` 后缀的独立文件里。名单只有当前快照、没有历史版本，回溯整窗
+不是 PIT —— 报告里以 ``blacklist.pit=false`` 明示，IC/分位仍按全样本统计。
 """
 
 from __future__ import annotations
@@ -60,8 +65,8 @@ DEFAULT_MIN_ADV = 2.0e7
 DEFAULT_COST_BPS = 15.0
 LOCK_STALE_SECONDS = 15 * 60
 EXECUTION_PRICES = ("open", "close")
-# 指数统一读 1_kline_data/index_daily（open/close 全有），基准超额按组合成交价对齐：
-# open 模型 open→open，close 模型 close→close；不用 daily_forward 里的指数（只有部分、且只有 close）。
+# 指数统一读 1_kline_data/index_daily（open/close 全有），基准超额按 open→open 对齐
+# TopN 的 T+1 开盘买入口径；不用 daily_forward 里的指数（只有部分、且只有 close）。
 INDEX_SYMBOLS = {
     "hs300": "399300.SZ",  # 沪深300
     "sse": "000001.SH",  # 上证指数
@@ -132,8 +137,11 @@ def _cache_dir(model_id: str) -> Path:
     return resolve_quantdb_dir().parent / "factor_research" / "model_signal" / model_id
 
 
-def _cache_paths(model_id: str, window_days: int) -> dict[str, Path]:
-    tag = f"ui_{window_days}d"
+def _cache_paths(
+    model_id: str, window_days: int, exclude_blacklist: bool = False
+) -> dict[str, Path]:
+    # 黑名单口径单独一份缓存/状态/锁：同一模型的两个视图互不覆盖，也不互相污染历史快照
+    tag = f"ui_{window_days}d" + ("_excl" if exclude_blacklist else "")
     base = _cache_dir(model_id)
     return {
         "report": base / f"{tag}.json",
@@ -167,18 +175,38 @@ def _latest_data_day() -> str:
     return days[-1] if days else ""
 
 
+def _exclusion_stamp() -> str | None:
+    """排除名单产物（机器基线 + 手工层）的 mtime/size 指纹。
+
+    黑名单口径的缓存必须随名单变化失效：管理员放行/拉黑一只票之后还拿旧缓存，
+    等于把「放行未生效」或「已拉黑仍按可买」摆到眼前。
+    """
+    from backend.shared.exclusion_list import exclusion_root
+
+    parts: list[str] = []
+    for name in ("cn.json", "cn_user.json"):
+        path = exclusion_root() / name
+        try:
+            stat = path.stat()
+            parts.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            parts.append(f"{name}:missing")
+    return "|".join(parts)
+
+
 def pred_fingerprint(
     pred_path: Path,
     *,
     horizon: int,
     window_days: int,
+    exclude_blacklist: bool = False,
     execution_price: str = "close",
 ) -> dict:
     try:
         stat = pred_path.stat()
     except OSError:
         stat = None
-    return {
+    fingerprint = {
         "pred_mtime": round(stat.st_mtime, 3) if stat else None,
         "pred_size": stat.st_size if stat else None,
         "data_day": _latest_data_day(),
@@ -187,6 +215,11 @@ def pred_fingerprint(
         "eval_version": EVAL_VERSION,
         "execution_price": str(execution_price or "close").lower(),
     }
+    # 只有黑名单口径才扩指纹：默认口径保持旧键集合，存量缓存不因这次改动整体失效
+    if exclude_blacklist:
+        fingerprint["exclude_blacklist"] = True
+        fingerprint["exclusion_stamp"] = _exclusion_stamp()
+    return fingerprint
 
 
 def test_signal_dates(pred_path: Path) -> list[str]:
@@ -229,10 +262,23 @@ def pick_window(
 # ---------------------------------------------------------------------------
 # 数据装载
 # ---------------------------------------------------------------------------
-def _picks_from_frame(frame: pd.DataFrame, n: int) -> dict[str, list[str]]:
+def _picks_from_frame(
+    frame: pd.DataFrame,
+    n: int,
+    *,
+    excluded_symbols: frozenset[str] = frozenset(),
+) -> dict[str, list[str]]:
+    """每日取 pred 前 n 只；``excluded_symbols`` 命中即跳过、由后一名顺延补足。
+
+    黑名单是**买入纪律**：实盘候选池里根本没有这些票，所以「排除后 TopN」必须仍是
+    n 只（跳过而不是留空位），否则组合的名义仓位与实际下单不一致。
+    """
     picks: dict[str, list[str]] = {}
     for date_key, group in frame.groupby("date_key", sort=True):
-        syms = group.nlargest(n, "pred")["sym_suffix"].tolist()
+        candidates = group
+        if excluded_symbols:
+            candidates = group[~group["sym_suffix"].isin(excluded_symbols)]
+        syms = candidates.nlargest(n, "pred")["sym_suffix"].tolist()
         if syms:
             picks[str(date_key)] = syms
     return picks
@@ -440,6 +486,7 @@ def topn_evaluation(
     cost_bps: float,
     min_adv: float,
     execution_price: str = "open",
+    excluded_symbols: frozenset[str] = frozenset(),
 ) -> list[dict]:
     symbols = sorted(frame["sym_suffix"].unique())
     market = equal_weight_market_returns(
@@ -450,7 +497,7 @@ def topn_evaluation(
     )
     rows: list[dict] = []
     for n in TOPN_LIST:
-        picks = _picks_from_frame(frame, n)
+        picks = _picks_from_frame(frame, n, excluded_symbols=excluded_symbols)
         daily, cohort = build_cohort_daily_returns(
             picks,
             horizon=horizon,
@@ -637,8 +684,11 @@ def unknown_admission(reason: str = "未完成标准化评估") -> dict:
 # ---------------------------------------------------------------------------
 # 历史快照（每日滚动体检趋势）
 # ---------------------------------------------------------------------------
-def _history_path(model_id: str, window_days: int) -> Path:
-    return _cache_dir(model_id) / f"ui_{window_days}d.history.jsonl"
+def _history_path(
+    model_id: str, window_days: int, exclude_blacklist: bool = False
+) -> Path:
+    tag = f"ui_{window_days}d" + ("_excl" if exclude_blacklist else "")
+    return _cache_dir(model_id) / f"{tag}.history.jsonl"
 
 
 def snapshot_from_report(report: dict) -> dict:
@@ -669,8 +719,13 @@ def snapshot_from_report(report: dict) -> dict:
     }
 
 
-def append_history(model_id: str, window_days: int, report: dict) -> None:
-    path = _history_path(model_id, window_days)
+def append_history(
+    model_id: str,
+    window_days: int,
+    report: dict,
+    exclude_blacklist: bool = False,
+) -> None:
+    path = _history_path(model_id, window_days, exclude_blacklist)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
@@ -682,9 +737,12 @@ def append_history(model_id: str, window_days: int, report: dict) -> None:
 
 
 def read_history(
-    model_id: str, window_days: int, limit: int = HISTORY_LIMIT
+    model_id: str,
+    window_days: int,
+    limit: int = HISTORY_LIMIT,
+    exclude_blacklist: bool = False,
 ) -> list[dict]:
-    path = _history_path(model_id, window_days)
+    path = _history_path(model_id, window_days, exclude_blacklist)
     try:
         if not path.is_file():
             return []
@@ -718,6 +776,7 @@ def compute_report(
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
     include_st: bool = False,
+    exclude_blacklist: bool = False,
     progress: Callable[[str, int, str], None] | None = None,
 ) -> dict:
     def tick(step: str, pct: int, message: str) -> None:
@@ -775,6 +834,29 @@ def compute_report(
     coverage = coverage_stats(pred_path, window, frame)
 
     tick("portfolio", 70, "模拟 TopN 长多…")
+    excluded_symbols: frozenset[str] = frozenset()
+    if exclude_blacklist:
+        # 名单缺失是配置事故（不是空名单）：直接失败，不拿「看起来正常的全样本结果」
+        # 冒充「已排除黑名单」的实盘口径。
+        from backend.shared.exclusion_list import load_exclusion_list
+
+        exclusion = load_exclusion_list("CN")
+        if exclusion is None:
+            raise EvalUnavailable(
+                "排除名单未导入（data/exclusions/cn.json），无法按黑名单口径评估"
+            )
+        excluded_symbols = exclusion.symbols()
+        blacklist_meta = {
+            "applied": True,
+            "excluded": int(len(excluded_symbols)),
+            "asof": exclusion.asof,
+            "overlay_updated_at": (exclusion.overlay or {}).get("updated_at"),
+            # 名单只有「当前快照」，没有历史版本：回溯整窗必然带前视，界面必须写明
+            "pit": False,
+            "note": "TopN 选股逐只跳过黑名单并顺延补足；IC/分位仍按全样本统计；当前名单回溯整窗（非 PIT）",
+        }
+    else:
+        blacklist_meta = {"applied": False, "excluded": 0, "pit": False}
     topn = topn_evaluation(
         frame,
         window,
@@ -782,6 +864,7 @@ def compute_report(
         cost_bps=cost_bps,
         min_adv=min_adv,
         execution_price=execution_price,
+        excluded_symbols=excluded_symbols,
     )
     verdict = build_verdict(raw, neutral, quant, stab, topn)
     benchmarks = index_daily_returns(start_iso, end_iso, price=execution_price)
@@ -831,6 +914,7 @@ def compute_report(
         },
         "series": {"weekly_ic": _weekly_ic(ic_daily), "benchmarks": bench_series},
         "topn": topn,
+        "blacklist": blacklist_meta,
         "verdict": verdict,
         "execution": {
             "price": "open" if str(execution_price).lower() == "open" else "close",
@@ -854,6 +938,7 @@ def compute_report(
                 if str(execution_price).lower() == "open"
                 else "close→close"
             ),
+            "blacklist_excluded": bool(exclude_blacklist),
         },
     }
     report["admission"] = admission_from_report(report)
@@ -881,8 +966,12 @@ def _status_payload(
     }
 
 
-def read_status(model_id: str, window_days: int) -> dict | None:
-    return _read_json(_cache_paths(model_id, window_days)["status"])
+def read_status(
+    model_id: str, window_days: int, exclude_blacklist: bool = False
+) -> dict | None:
+    return _read_json(
+        _cache_paths(model_id, window_days, exclude_blacklist)["status"]
+    )
 
 
 def get_state(
@@ -893,6 +982,7 @@ def get_state(
     horizon: int = DEFAULT_HORIZON,
     execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
+    exclude_blacklist: bool = False,
 ) -> dict:
     """GET 载荷：缓存是否可用、是否过期、后台是否在跑。"""
     if str(market).upper() != "CN":
@@ -906,17 +996,18 @@ def get_state(
             "status": "unavailable",
             "reason": "模型目录没有 pred.parquet（还没推理过）",
         }
-    paths = _cache_paths(model_id, window_days)
+    paths = _cache_paths(model_id, window_days, exclude_blacklist)
     fingerprint = pred_fingerprint(
         pred_path,
         horizon=horizon,
         window_days=window_days,
+        exclude_blacklist=exclude_blacklist,
         execution_price=execution_price,
     )
     cached = _read_json(paths["report"])
     cached_report = cached.get("report") if cached else None
-    history = read_history(model_id, window_days)
-    status = read_status(model_id, window_days) or {}
+    history = read_history(model_id, window_days, exclude_blacklist=exclude_blacklist)
+    status = read_status(model_id, window_days, exclude_blacklist) or {}
     # 进程被杀时 lock 会在 finally 前残留/状态停在 running：锁文件不在即视为无作业
     if status.get("status") == "running" and not paths["lock"].is_file():
         status = {}
@@ -1034,6 +1125,7 @@ def _compute_and_store(
     min_adv: float,
     cost_bps: float,
     include_st: bool,
+    exclude_blacklist: bool = False,
     progress: Callable[[str, int, str], None],
 ) -> dict:
     report = compute_report(
@@ -1046,6 +1138,7 @@ def _compute_and_store(
         min_adv=min_adv,
         cost_bps=cost_bps,
         include_st=include_st,
+        exclude_blacklist=exclude_blacklist,
         progress=progress,
     )
     pred_path = pred_parquet_path(storage_path)
@@ -1054,13 +1147,14 @@ def _compute_and_store(
         pred_path,
         horizon=horizon,
         window_days=window_days,
+        exclude_blacklist=exclude_blacklist,
         execution_price=execution_price,
     )
-    paths = _cache_paths(model_id, window_days)
+    paths = _cache_paths(model_id, window_days, exclude_blacklist)
     _atomic_write_json(
         paths["report"], {"fingerprint": report["fingerprint"], "report": report}
     )
-    append_history(model_id, window_days, report)
+    append_history(model_id, window_days, report, exclude_blacklist)
     _atomic_write_json(
         paths["status"],
         _status_payload("done", progress=100, step="done", message="完成"),
@@ -1079,8 +1173,9 @@ def _run_job(
     min_adv: float,
     cost_bps: float,
     include_st: bool,
+    exclude_blacklist: bool = False,
 ) -> None:
-    paths = _cache_paths(model_id, window_days)
+    paths = _cache_paths(model_id, window_days, exclude_blacklist)
 
     def progress(step: str, pct: int, message: str) -> None:
         _atomic_write_json(
@@ -1100,6 +1195,7 @@ def _run_job(
             min_adv=min_adv,
             cost_bps=cost_bps,
             include_st=include_st,
+            exclude_blacklist=exclude_blacklist,
             progress=progress,
         )
     except Exception as exc:  # noqa: BLE001 — 作业错误要显式落盘给前端
@@ -1123,9 +1219,10 @@ def refresh_sync(
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
     include_st: bool = False,
+    exclude_blacklist: bool = False,
 ) -> dict | None:
     """同步刷新（供 Celery 日更使用）：拿不到锁返回 None，不并发重复算。"""
-    paths = _cache_paths(model_id, window_days)
+    paths = _cache_paths(model_id, window_days, exclude_blacklist)
     if not _acquire_lock(paths["lock"]):
         return None
 
@@ -1147,6 +1244,7 @@ def refresh_sync(
             min_adv=min_adv,
             cost_bps=cost_bps,
             include_st=include_st,
+            exclude_blacklist=exclude_blacklist,
             progress=progress,
         )
     except Exception as exc:  # noqa: BLE001 — 状态落盘，便于第二天排查
@@ -1171,6 +1269,7 @@ def start_refresh(
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
     include_st: bool = False,
+    exclude_blacklist: bool = False,
 ) -> dict:
     """启动后台计算；已有活跃作业时直接返回 running。"""
     if str(market).upper() != "CN":
@@ -1183,8 +1282,8 @@ def start_refresh(
             "status": "unavailable",
             "reason": "模型目录没有 pred.parquet（还没推理过）",
         }
-    paths = _cache_paths(model_id, window_days)
-    status = read_status(model_id, window_days) or {}
+    paths = _cache_paths(model_id, window_days, exclude_blacklist)
+    status = read_status(model_id, window_days, exclude_blacklist) or {}
     if status.get("status") == "running" and not _lock_is_stale(paths["lock"]):
         return {"status": "running"}
     if not _acquire_lock(paths["lock"]):
@@ -1204,6 +1303,7 @@ def start_refresh(
             "min_adv": min_adv,
             "cost_bps": cost_bps,
             "include_st": include_st,
+            "exclude_blacklist": exclude_blacklist,
         },
         daemon=True,
         name=f"signal-eval-{model_id[:16]}",

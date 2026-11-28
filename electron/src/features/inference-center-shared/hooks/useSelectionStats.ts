@@ -32,7 +32,10 @@ export interface SelectionStatsState {
   reload: () => void;
 }
 
-export function useSelectionStats(modelId: string | null): SelectionStatsState {
+export function useSelectionStats(
+  modelId: string | null,
+  excludeBlacklist = false,
+): SelectionStatsState {
   const [stats, setStats] = useState<SelectionStatsResponse | null>(null);
   const [bounds, setBounds] = useState<SelectionBounds | null>(null);
   const [loading, setLoading] = useState(false);
@@ -50,7 +53,7 @@ export function useSelectionStats(modelId: string | null): SelectionStatsState {
       setLoading(true);
       setError(null);
       void selectionStatsService
-        .fetch(modelId, query)
+        .fetch(modelId, { ...query, exclude_blacklist: excludeBlacklist })
         .then((data) => {
           if (seq !== seqRef.current) return;
           setStats(data);
@@ -65,7 +68,7 @@ export function useSelectionStats(modelId: string | null): SelectionStatsState {
           setLoading(false);
         });
     },
-    [modelId],
+    [modelId, excludeBlacklist],
   );
 
   const reload = useCallback(() => {
@@ -73,6 +76,7 @@ export function useSelectionStats(modelId: string | null): SelectionStatsState {
   }, [load]);
 
   useEffect(() => {
+    const key = `${modelId ?? ''}|${excludeBlacklist ? 'excl' : 'all'}`;
     if (!modelId) {
       autoRef.current = null;
       seqRef.current += 1;
@@ -82,16 +86,16 @@ export function useSelectionStats(modelId: string | null): SelectionStatsState {
       setLoading(false);
       return;
     }
-    if (autoRef.current === modelId) return;
-    autoRef.current = modelId;
-    // 换模型：旧结果与旧请求一并作废
+    if (autoRef.current === key) return;
+    autoRef.current = key;
+    // 换模型/换口径：旧结果与旧请求一并作废
     seqRef.current += 1;
     setStats(null);
     setBounds(null);
     setError(null);
     lastQueryRef.current = {};
     load({});
-  }, [modelId, load]);
+  }, [modelId, excludeBlacklist, load]);
 
   return { stats, bounds, loading, error, load, reload };
 }

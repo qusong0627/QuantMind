@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { Switch } from 'antd';
 import {
   Bar,
   BarChart,
@@ -27,6 +28,10 @@ import type {
  *
  * 数据来自「推理过的 test 切分」，窗口随推理与行情自动前移；首次打开会后台重算，
  * 计算中保留旧统计并在顶部显示进度条。
+ *
+ * 开关「排除黑名单」：TopN 选股按后台管理·交易核心的黑名单逐只跳过、顺延补足，
+ * 即实盘候选池口径（独立缓存，首次约 1 分钟重算）。名单是当前快照、回溯整窗非 PIT，
+ * IC/分位仍按全样本统计 —— 页面用徽章与 tooltip 明示，不把两种口径混着读。
  */
 
 const STEP_LABELS: Record<string, string> = {
@@ -192,6 +197,9 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
   const [state, setState] = useState<SignalEvalState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 实盘口径开关：TopN 选股逐只跳过交易黑名单并顺延补足（候选池里本来就没有这些票）。
+  // 默认关 = 模型原始口径；打开走独立缓存（ui_63d_excl），首次需要约 1 分钟重算。
+  const [excludeBlacklist, setExcludeBlacklist] = useState(false);
   const autoAsked = useRef(false);
 
   useEffect(() => {
@@ -199,11 +207,13 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
     setState(null);
     setError(null);
     setLoading(true);
-  }, [modelId]);
+  }, [modelId, excludeBlacklist]);
 
   const load = useCallback(async () => {
     try {
-      const next = await modelTrainingService.getModelSignalEval(modelId);
+      const next = await modelTrainingService.getModelSignalEval(modelId, {
+        excludeBlacklist,
+      });
       setState(next);
       setError(null);
     } catch (err: unknown) {
@@ -211,7 +221,7 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
     } finally {
       setLoading(false);
     }
-  }, [modelId]);
+  }, [modelId, excludeBlacklist]);
 
   const triggerRefresh = useCallback(async () => {
     autoAsked.current = true;
@@ -236,13 +246,13 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
       };
     });
     try {
-      await modelTrainingService.refreshModelSignalEval(modelId);
+      await modelTrainingService.refreshModelSignalEval(modelId, { excludeBlacklist });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '刷新失败');
       return;
     }
     await load();
-  }, [load, modelId]);
+  }, [excludeBlacklist, load, modelId]);
 
   useEffect(() => {
     void load();
@@ -373,6 +383,18 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
           ) : null}
         </div>
         <div className="flex items-center gap-2 text-[9px] text-slate-400">
+          <label
+            className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] font-bold text-slate-500"
+            title="TopN 选股逐只跳过交易黑名单并顺延补足（实盘候选池口径）。名单只有当前快照，回溯整窗非 PIT；IC/分位仍按全样本统计。"
+          >
+            <Switch
+              size="small"
+              checked={excludeBlacklist}
+              disabled={isRunning}
+              onChange={(checked) => setExcludeBlacklist(checked)}
+            />
+            排除黑名单
+          </label>
           <span className="tabular-nums">{headerMeta}</span>
           <button
             type="button"
@@ -603,6 +625,17 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
                   >
                     严格实盘
                   </span>
+                  {report.blacklist?.applied ? (
+                    <span
+                      className="rounded bg-rose-50 px-1.5 py-0.5 text-[8px] font-black text-rose-600"
+                      title={
+                        report.blacklist.note ||
+                        'TopN 选股已剔除交易黑名单（跳过并顺延补足）'
+                      }
+                    >
+                      黑名单生效 {report.blacklist.excluded} 只
+                    </span>
+                  ) : null}
                 </span>
                 <span className="text-[9px] text-slate-400">
                   {report.execution?.entry ?? 'T+1 开盘'} · 持 {report.window.horizon} 日 ·{' '}

@@ -296,7 +296,7 @@ export function buildRankingCsv(rows: readonly BlendRankingRow[], memberCount: n
 
 export function rankingCsvFilename(blendName: string, dataTradeDate: string): string {
   const safe = blendName.replace(/[\\/:*?"<>|]/g, '_').trim() || 'combo';
-  return `组合选股_${safe}_${dataTradeDate}.csv`;
+  return `组合排名_${safe}_${dataTradeDate}.csv`;
 }
 
 // ── 模板 ───────────────────────────────────────────────────────────────

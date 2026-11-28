@@ -1,5 +1,8 @@
 /**
- * 交易黑名单维护表（个人中心）。
+ * 交易黑名单维护表（后台管理 · 交易核心）。
+ *
+ * 2026-11-28 自模拟交易「个人中心」迁入：名单是**全平台一份**，模拟盘/实盘的
+ * 候选信号、推送预检、决策轮共用，不是某个账户的私有设置。
  *
  * 这一页维护的是**排除名单的用户层**：手工加入 / 例外放行 / 撤销。机器基线
  * （隔壁 quant-Trader 每日导入的那 1800+ 只）在这里只读——可以放行其中某一只，
@@ -44,8 +47,8 @@ const PAGE_SIZE = 50;
 
 const ACTION_OPTIONS: { value: ActionFilter; label: string }[] = [
   { value: 'all', label: '全部' },
-  { value: 'manual', label: '我排除的' },
-  { value: 'allow', label: '我放行的' },
+  { value: 'manual', label: '手工排除' },
+  { value: 'allow', label: '手工放行' },
   { value: 'machine', label: '机器名单' },
 ];
 
@@ -199,7 +202,7 @@ export function TradingBlacklistPanel() {
   );
 
   return (
-    <section className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col min-h-0">
+    <section className="bg-white rounded-2xl border border-gray-200 shadow-sm flex h-full min-h-0 flex-col">
       <header className="px-4 pt-3 pb-2.5 border-b border-gray-100 shrink-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-rose-50 text-rose-600 shrink-0">
@@ -207,7 +210,7 @@ export function TradingBlacklistPanel() {
           </span>
           <h3 className="text-[15px] font-bold text-gray-800">交易黑名单</h3>
           <span className="text-[11px] text-gray-500">
-            候选信号默认排除这些股票；放行需要你逐只确认
+            全局名单（模拟盘 / 实盘共用）：候选信号默认排除这些股票；放行需要你逐只确认
           </span>
           <button
             onClick={runImport}
@@ -233,8 +236,8 @@ export function TradingBlacklistPanel() {
             <>
               <Stat label="名单总条数" value={summary.total} tone="slate" />
               <Stat label="当前拦买" value={summary.blocking} tone="rose" />
-              <Stat label="我排除的" value={summary.manual} tone="amber" />
-              <Stat label="我放行的" value={summary.allow} tone="emerald" />
+              <Stat label="手工排除" value={summary.manual} tone="amber" />
+              <Stat label="手工放行" value={summary.allow} tone="emerald" />
               <span className="text-[10px] text-gray-400 font-mono">
                 基准日 {summary.asof || '未知'}
               </span>
@@ -335,7 +338,7 @@ export function TradingBlacklistPanel() {
                               : 'bg-emerald-50 text-emerald-600 border-emerald-200'
                           }`}
                         >
-                          {reason.mine.action === 'block' ? '我的理由' : '放行理由'}
+                          {reason.mine.action === 'block' ? '手工理由' : '放行理由'}
                         </span>
                         <span
                           className={`text-gray-800 whitespace-pre-wrap break-words leading-snug min-w-0 ${
@@ -485,8 +488,8 @@ export type EntryTarget =
   | { mode: 'edit'; row: BlacklistRow }
   | { mode: 'allow'; row: BlacklistRow };
 
-const DEFAULT_BLOCK_REASON = '个人中心手工加入';
-const DEFAULT_ALLOW_REASON = '个人中心手工放行';
+const DEFAULT_BLOCK_REASON = '后台管理手工加入';
+const DEFAULT_ALLOW_REASON = '后台管理手工放行';
 
 /**
  * 新增 / 编辑手工条目。

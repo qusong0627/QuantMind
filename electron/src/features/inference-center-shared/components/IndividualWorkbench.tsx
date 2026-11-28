@@ -13,7 +13,7 @@ import React, { useMemo, useState } from 'react';
 import { Button, DatePicker, Input, Select, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import { clsx } from 'clsx';
 import {
-  Search, Clock, Calendar, Database, Play, TrendingUp, Sparkles, Layers, X,
+  Search, Clock, Calendar, Database, Play, TrendingUp, Sparkles, Layers, X, ShieldAlert,
 } from 'lucide-react';
 import { StockForecastChart } from './StockForecastChart';
 import { ModelScoreCurveGrid } from './ModelScoreCurveGrid';
@@ -80,6 +80,10 @@ interface IndividualWorkbenchProps {
   suggestionLabel: (item: SuggestionItem) => string;
   /** 多模型分数曲线需要的后缀式代码 */
   toSuffixSymbol: (symbol: string) => string;
+  /** 推理中心「排除黑名单」开关已打开 */
+  excludeBlacklist?: boolean;
+  /** 当前标的命中交易黑名单时带出的名单基准日（null=未命中） */
+  blacklistAsOf?: string | null;
 }
 
 /** 报价条里的一格：标签在上、值在下，横向细线分隔 */
@@ -96,6 +100,8 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
   searchPlaceholder,
   suggestionLabel,
   toSuffixSymbol,
+  excludeBlacklist = false,
+  blacklistAsOf = null,
 }) => {
   const { prediction } = ip;
   // 分数落点：预测日（默认，分数画在 D）/ 兑现日（分数画在 D+1+N）。
@@ -182,6 +188,16 @@ export const IndividualWorkbench: React.FC<IndividualWorkbenchProps> = ({
 
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-white border border-slate-200 rounded-xl overflow-hidden">
+      {excludeBlacklist && blacklistAsOf ? (
+        <div className="shrink-0 flex items-start gap-2 px-3 py-2 bg-rose-50 border-b border-rose-200 text-[11px] leading-relaxed text-rose-700">
+          <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+          <span>
+            该标的在<b>交易黑名单</b>
+            {blacklistAsOf ? `（名单基准日 ${blacklistAsOf}）` : ''}
+            ，已按「排除黑名单」口径从候选与排名中排除；以下仅为研究视图，不构成交易候选。
+          </span>
+        </div>
+      ) : null}
       {/* ── 配置工具条 ────────────────────────────────────────
           七个控件在 1440（Electron 最小宽）的 876px 里本来刚好放不下，
           「开始个股推理」会被挤到第二行、整条吃掉 89px。这里把两处弹性下限

@@ -103,6 +103,20 @@ export interface SignalEvalVerdict {
   summary: string;
 }
 
+export interface SignalEvalBlacklist {
+  /** 本次统计是否按「剔除交易黑名单」口径计算 */
+  applied: boolean;
+  /** 当前生效（blocking 且未过期）的名单条数 */
+  excluded: number;
+  /** 机器名单基准日 */
+  asof?: string | null;
+  /** 手工层最后修改时间 */
+  overlay_updated_at?: string | null;
+  /** 名单只有当前快照、没有历史版本：回溯整窗带前视 */
+  pit: boolean;
+  note?: string;
+}
+
 export interface SignalEvalReport {
   status: 'ready';
   model_id: string;
@@ -132,6 +146,7 @@ export interface SignalEvalReport {
     benchmarks?: Record<string, Array<{ date: string; nav: number }>>;
   };
   topn: SignalEvalTopN[];
+  blacklist?: SignalEvalBlacklist;
   execution?: {
     /** 训练时的成交价口径：open = T+1 开盘买，close = T+1 收盘买 */
     price?: 'open' | 'close';
@@ -145,6 +160,7 @@ export interface SignalEvalReport {
     adv_floor_yuan: number;
     missing_price_skipped: boolean;
     benchmark_basis: string;
+    blacklist_excluded?: boolean;
   };
   verdict: SignalEvalVerdict;
   admission?: SignalEvalAdmission;

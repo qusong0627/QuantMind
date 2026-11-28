@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Switch, Tag, Typography, Space, Divider, message, Spin, Alert } from 'antd';
-import { RobotOutlined, SettingOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import { RobotOutlined, SettingOutlined, CheckCircleOutlined, CloseCircleOutlined, KeyOutlined, ApiOutlined } from '@ant-design/icons';
 import { adminService } from '../services/adminService';
+import { ApiKeyPanel } from '../../api-keys/ApiKeyPanel';
+import { AdminMcpPanel } from './AdminMcpPanel';
 
 const { Title, Text } = Typography;
 
 export const AdminSystemSettings: React.FC = () => {
+    const [section, setSection] = useState<'finbert' | 'credentials' | 'mcp'>('finbert');
     const [enabled, setEnabled] = useState<boolean | null>(null);
     const [loading, setLoading] = useState(false);
     const [detail, setDetail] = useState<any>(null);
@@ -49,18 +52,15 @@ export const AdminSystemSettings: React.FC = () => {
         }
     };
 
-    if (initialLoading) {
-        return (
-            <div className="w-full flex flex-col items-center justify-center py-20">
-                <Spin />
-                <Text className="text-slate-400 text-xs mt-3">加载系统设置...</Text>
-            </div>
-        );
-    }
-
     const notInstalled = !!detail && detail.installed === false;
     const noFramework = !!detail && detail.framework_ok === false;
     const cannotEnable = notInstalled || noFramework;
+
+    const SECTIONS = [
+        { key: 'finbert' as const, label: '金融情感', icon: <RobotOutlined /> },
+        { key: 'credentials' as const, label: 'SDK 接入凭证', icon: <KeyOutlined /> },
+        { key: 'mcp' as const, label: 'MCP 服务', icon: <ApiOutlined /> },
+    ];
 
     return (
         <div className="w-full space-y-4">
@@ -68,9 +68,58 @@ export const AdminSystemSettings: React.FC = () => {
                 <Title level={4} className="!m-0 !font-black !text-slate-800 flex items-center gap-2">
                     <SettingOutlined className="text-slate-700" /> 系统设置
                 </Title>
-                <Text className="text-slate-400 text-xs">基础设施与 AI 能力开关</Text>
+                <Text className="text-slate-400 text-xs">基础设施与 AI 能力开关 · 外部接入凭据</Text>
             </div>
 
+            {/* 二级菜单：金融情感固定第一项（用户口径），凭证在第二项 */}
+            <div className="flex items-center gap-1 border-b border-slate-200 pb-2">
+                {SECTIONS.map((item) => {
+                    const active = section === item.key;
+                    return (
+                        <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => setSection(item.key)}
+                            aria-current={active ? 'page' : undefined}
+                            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                                active
+                                    ? 'bg-slate-900 text-white shadow-sm'
+                                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                            }`}
+                        >
+                            {item.icon}
+                            {item.label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {section === 'mcp' ? (
+                <Card
+                    className="rounded-2xl border-slate-200 shadow-sm"
+                    styles={{ body: { padding: '16px' } }}
+                    title={<span className="text-sm font-black text-slate-800 flex items-center gap-2"><ApiOutlined /> MCP 服务</span>}
+                    extra={<Tag color="purple" className="m-0 border-none text-[11px]">AI 客户端接入</Tag>}
+                >
+                    <AdminMcpPanel />
+                </Card>
+            ) : section === 'credentials' ? (
+                <Card
+                    className="rounded-2xl border-slate-200 shadow-sm"
+                    styles={{ body: { padding: '16px' } }}
+                    title={<span className="text-sm font-black text-slate-800 flex items-center gap-2"><KeyOutlined /> SDK 接入凭证 / API 密钥</span>}
+                    extra={<Tag color="blue" className="m-0 border-none text-[11px]">外部系统</Tag>}
+                >
+                    {/* 自模拟交易「设置中心」迁入（2026-11-28）：这对密钥是外部 SDK 的接入凭据，
+                        不是交易账户设置，入口归系统设置 */}
+                    <ApiKeyPanel />
+                </Card>
+            ) : initialLoading ? (
+                <div className="w-full flex flex-col items-center justify-center py-20">
+                    <Spin />
+                    <Text className="text-slate-400 text-xs mt-3">加载系统设置...</Text>
+                </div>
+            ) : (
             <Card className="rounded-2xl border-slate-200 shadow-sm" styles={{ body: { padding: '16px' } }} title={<span className="text-sm font-black text-slate-800 flex items-center gap-2"><RobotOutlined /> FinBERT 中文金融情感</span>} extra={<Tag color={enabled ? 'success' : 'default'} className="m-0 border-none text-[11px]">{enabled ? '已开启' : enabled === null ? '未知' : '已关闭'}</Tag>}>
                 <div className="flex items-center justify-between gap-4">
                     <div className="flex-1 min-w-0">
@@ -120,10 +169,7 @@ export const AdminSystemSettings: React.FC = () => {
                 <Divider className="!my-3" />
                 <Alert type="info" showIcon className="rounded-xl text-xs !py-2 !px-3" message="提示" description="首次开启需后台加载模型约 10-20s，期间新入库资讯仍走字典法；已入库历史需重建 enrichment 才会回填 FinBERT 置信度。" />
             </Card>
-
-            <Card className="rounded-2xl border-dashed border-slate-200 bg-slate-50/50" styles={{ body: { padding: '12px 16px' } }} title={<span className="text-sm font-bold text-slate-500">更多系统设置（占位）</span>}>
-                <Text className="text-xs text-slate-400">后续可在此集中管理：数据同步开关、模型推理并发、QuantDB 缓存 TTL 等。</Text>
-            </Card>
+            )}
         </div>
     );
 };

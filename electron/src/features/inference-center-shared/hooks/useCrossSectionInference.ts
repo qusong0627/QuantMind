@@ -92,6 +92,7 @@ export function useCrossSectionInference(
   market: string,
   calendar: string,
   initialModelId = '',
+  excludeBlacklist = false,
 ): CrossSectionInference {
   const [registeredModels, setRegisteredModels] = useState<UserModelRecord[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -286,7 +287,9 @@ export function useCrossSectionInference(
       const candidates = [lastRun, ...fallbackRuns];
       for (const candidate of candidates) {
         try {
-          const r = await modelTrainingService.getInferenceResult(candidate.run_id);
+          const r = await modelTrainingService.getInferenceResult(candidate.run_id, undefined, {
+            excludeBlacklist,
+          });
           if (cancelled) return;
           if ((r?.rankings?.length ?? 0) > 0 || candidate.run_id === runId) {
             // 命中第一批有明细的；首批本身就是空的也照样展示（UI 会说明原因）
@@ -313,7 +316,7 @@ export function useCrossSectionInference(
     return () => {
       cancelled = true;
     };
-  }, [lastRun?.run_id, lastRun?.status, fallbackRuns]);
+  }, [lastRun?.run_id, lastRun?.status, fallbackRuns, excludeBlacklist]);
   // 说明：fallbackRuns 由上面的历史加载写入，且写入前做过内容比对，
   // 因此这里的依赖不会因为数组引用变化而空转。
 

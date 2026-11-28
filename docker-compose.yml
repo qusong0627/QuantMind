@@ -546,6 +546,31 @@ services:
     networks:
       - quantmind-net
 
+  # 3b. MCP 服务（2026-11-28）：独立容器，经 /api/ext/v1 访问平台；不直连 DB。
+  # 对外只绑 127.0.0.1:8765，远程接入走 nginx /mcp + TLS。
+  mcp:
+    image: quantmind-mcp:latest
+    platform: linux/amd64
+    container_name: quantmind-mcp
+    depends_on:
+      quantmind:
+        condition: service_healthy
+    environment:
+      QM_API_BASE: http://quantmind:8000
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8765"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_MCP_DB: "0"
+    ports:
+      # 宿主 8765 已被其它项目占用（inkwell server），MCP 对外只经 nginx /mcp；
+      # 这里映射到 18765 仅供本机调试，避免与既有服务抢端口。
+      - "127.0.0.1:18765:8765"
+    restart: unless-stopped
+    networks:
+      - quantmind-net
+
   # 4. Celery Worker (Qlib 回测任务)
   celery-worker:
     image: quantmind-oss:latest

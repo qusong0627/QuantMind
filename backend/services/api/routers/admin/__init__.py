@@ -35,6 +35,7 @@ from .orders import router as orders_router
 from .inference_monitor import router as inference_monitor_router
 from .realtime import router as realtime_admin_router
 from .research_control import router as research_control_router
+from .mcp import router as mcp_router
 
 admin_router = APIRouter()
 admin_router.include_router(
@@ -131,3 +132,4 @@ admin_router.include_router(realtime_admin_router, prefix="/realtime", tags=["Ad
 admin_router.include_router(
     research_control_router, prefix="/research-control", tags=["Admin-ResearchControl"]
 )
+admin_router.include_router(mcp_router, prefix="/mcp", tags=["Admin-MCP"])

@@ -35,7 +35,7 @@ export interface InferenceCenterAdapter {
   searchPlaceholder: string;
 
   /**
-   * 是否支持「组合选股」工作区（能力位，组件里不写 `market === 'CN'`）。
+   * 是否支持「组合排名」工作区（能力位，组件里不写 `market === 'CN'`）。
    * 后端组合候选目前只接受 CN 签名；HK/US/FUTURES 缺省关闭，避免出现必空的面板。
    */
   supportsCombo?: boolean;

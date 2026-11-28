@@ -92,6 +92,7 @@ class ModelSelectionStatsService:
         top_k: int = MAX_TOP_K,
         hold_days: int | None = None,
         capital: float = 10_000_000.0,
+        exclude_blacklist: bool = False,
     ) -> dict[str, Any]:
         self._validate(
             top_k=top_k, hold_days=hold_days, capital=capital, start=start, end=end
@@ -133,8 +134,27 @@ class ModelSelectionStatsService:
         pred_path = self._pred_path(storage_path)
         if pred_path is None:
             raise SelectionStatsError(
-                "pred_unavailable", "模型未找到 pred.parquet，无法统计历史选股"
+                "pred_unavailable", "模型未找到 pred.parquet，无法统计历史排名"
             )
+
+        blocked: frozenset[str] = frozenset()
+        blacklist_meta: dict[str, Any] = {"applied": False}
+        if exclude_blacklist:
+            from backend.shared.exclusion_list import load_exclusion_list
+
+            exclusion = load_exclusion_list("CN")
+            if exclusion is None:
+                raise SelectionStatsError(
+                    "blacklist_unavailable",
+                    "排除名单未导入（data/exclusions/cn.json），无法按黑名单口径统计",
+                    status_code=409,
+                )
+            blocked = exclusion.symbols()
+            blacklist_meta = {
+                "applied": True,
+                "excluded": len(blocked),
+                "asof": exclusion.asof,
+            }
 
         cache_key = (
             str(resolved.effective_model_id or model_id),
@@ -145,6 +165,7 @@ class ModelSelectionStatsService:
             int(top_k),
             int(hold),
             int(lag),
+            bool(exclude_blacklist),
         )
         unit = self._cache_get(cache_key)
         if unit is None:
@@ -165,6 +186,8 @@ class ModelSelectionStatsService:
                 top_k=int(top_k),
                 start=start,
                 end=end,
+                blocked=blocked,
+                blacklist_meta=blacklist_meta,
             )
             self._cache_set(cache_key, unit)
 
@@ -253,6 +276,8 @@ class ModelSelectionStatsService:
         top_k: int,
         start: date | None,
         end: date | None,
+        blocked: frozenset[str] = frozenset(),
+        blacklist_meta: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         first_day, last_day, total_signal_days = self._read_test_bounds(pred_path)
         if total_signal_days < MIN_TOTAL_SIGNAL_DAYS:
@@ -282,6 +307,7 @@ class ModelSelectionStatsService:
             effective_start,
             effective_end,
             top_k,
+            blocked=blocked,
         )
         if not picks_by_signal:
             raise SelectionStatsError(
@@ -374,6 +400,7 @@ class ModelSelectionStatsService:
                 "benchmark": BENCHMARK_SYMBOL,
                 "cohort_mode": "daily" if hold_days == 1 else "period",
             },
+            "blacklist": dict(blacklist_meta or {"applied": False}),
             "summary": result["summary"],
             "months": result["months"],
             "cohorts": rows,
@@ -416,7 +443,10 @@ class ModelSelectionStatsService:
         start: date,
         end: date,
         top_k: int,
+        blocked: frozenset[str] = frozenset(),
     ) -> dict[date, list[str]]:
+        # 多取 len(blocked) 行，保证剔除黑名单后仍能凑满 top_k（跳过后顺延补足）
+        candidate_limit = int(top_k) + (len(blocked) if blocked else 0)
         escaped = str(pred_path).replace("'", "''")
         sql = f"""
             WITH ranked AS (
@@ -439,7 +469,7 @@ class ModelSelectionStatsService:
         """
         con = duckdb.connect()
         try:
-            rows = con.execute(sql, [start, end, int(top_k)]).fetchall()
+            rows = con.execute(sql, [start, end, candidate_limit]).fetchall()
         except Exception as exc:  # noqa: BLE001
             logger.warning("抽取 TopK 失败 %s: %s", pred_path, exc)
             raise SelectionStatsError(
@@ -451,7 +481,11 @@ class ModelSelectionStatsService:
         picks: dict[date, list[str]] = {}
         for symbol, trade_day in rows:
             day = _as_date(trade_day)
-            picks.setdefault(day, []).append(str(symbol))
+            if blocked and StockCodeUtil.to_suffix(str(symbol)) in blocked:
+                continue
+            bucket = picks.setdefault(day, [])
+            if len(bucket) < int(top_k):
+                bucket.append(str(symbol))
         return picks
 
     # ── 行情 ──────────────────────────────────────────────────────────
@@ -576,6 +610,7 @@ class ModelSelectionStatsService:
             "requested": requested,
             "effective": unit["effective"],
             "params": unit["params"],
+            "blacklist": unit.get("blacklist", {"applied": False}),
             "summary": summary,
             "months": months,
             "cohorts": cohorts,

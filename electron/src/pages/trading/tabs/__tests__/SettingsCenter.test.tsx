@@ -53,12 +53,9 @@ const renderSettings = (
         </Provider>,
     );
 
-/** 顶部页签条上的按钮文案（凭证面板里也有按钮，按容器锚定，不按全页按钮取） */
+/** 顶部页签条上的按钮文案（按 `settings-tabs` 锚定；没有页签时返回空数组） */
 const tabLabels = (): string[] => {
-    const anchor = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent || '').includes('接入凭证'),
-    );
-    const strip = anchor?.parentElement;
+    const strip = document.querySelector('[data-testid="settings-tabs"]');
     if (!strip) return [];
     return Array.from(strip.querySelectorAll('button')).map((b) => (b.textContent || '').trim());
 };
@@ -83,6 +80,7 @@ describe('SettingsCenter 实盘配置闸门', () => {
 
         expect(screen.queryByText('券商实盘接入')).not.toBeNull();
         expect(screen.queryByText('真单镜像')).not.toBeNull();
+        expect(tabLabels()).toEqual(['券商实盘接入', '真单镜像']);
     });
 
     it('显式 true：与缺省一致', () => {
@@ -92,19 +90,20 @@ describe('SettingsCenter 实盘配置闸门', () => {
         expect(screen.queryByText('真单镜像')).not.toBeNull();
     });
 
-    it('显式 false（模拟栏）：实盘两个入口一个都不渲染', () => {
+    it('显式 false（模拟栏）：实盘两个入口一个都不渲染，凭证页也不再出现在这里', () => {
         renderSettings(false);
 
         expect(screen.queryByText('券商实盘接入')).toBeNull();
         expect(screen.queryByText('真单镜像')).toBeNull();
-        // 不是整块塌掉：凭证页还在，且只剩它一个页签
-        expect(tabLabels()).toEqual(['接入凭证 / API 密钥']);
+        // 凭证已迁后台管理系统设置：这里没有页签，只有迁移说明
+        expect(tabLabels()).toEqual([]);
+        expect(screen.queryByText('接入凭证 / API 密钥已迁至后台管理')).not.toBeNull();
     });
 
-    it('显式 false：说明文案也不承诺实盘（免得标题下写着有、页签里找不到）', () => {
+    it('显式 false：说明文案指路后台管理，不承诺实盘', () => {
         renderSettings(false);
 
-        expect(screen.queryByText('管理接入凭证与 API 密钥。')).not.toBeNull();
+        expect(screen.queryByText('接入凭证 / API 密钥已迁至「后台管理 → 系统设置」。')).not.toBeNull();
         expect(screen.queryByText(/券商实盘通道/)).toBeNull();
     });
 
@@ -160,16 +159,17 @@ describe('SettingsCenter 追加面板', () => {
         vi.unstubAllGlobals();
     });
 
-    it('不传 = 公开树形态：页签条与引入本机制前逐位相同', () => {
+    it('不传 = 公开树形态：没有实盘面板也没有追加面板时，只有迁移说明', () => {
         renderWithPanels();
 
-        expect(tabLabels()).toEqual(['接入凭证 / API 密钥']);
+        expect(tabLabels()).toEqual([]);
+        expect(screen.queryByText('接入凭证 / API 密钥已迁至后台管理')).not.toBeNull();
     });
 
-    it('页签追加在内置栏之后，点了才挂载内容', () => {
+    it('页签只列追加面板，点了才挂载内容', () => {
         renderWithPanels(panels);
 
-        expect(tabLabels()).toEqual(['接入凭证 / API 密钥', '总控', '数据']);
+        expect(tabLabels()).toEqual(['总控', '数据']);
         expect(screen.queryByTestId('panel-control')).toBeNull();
 
         fireEvent.click(screen.getByText('总控'));
@@ -177,17 +177,17 @@ describe('SettingsCenter 追加面板', () => {
         expect(screen.queryByTestId('panel-data')).toBeNull();
     });
 
-    it('切走即卸载（不留后台轮询），切回凭证页也不残留', () => {
+    it('切走即卸载（不留后台轮询）', () => {
         renderWithPanels(panels);
 
         fireEvent.click(screen.getByText('数据'));
         expect(screen.queryByTestId('panel-data')).not.toBeNull();
 
-        fireEvent.click(screen.getByText('接入凭证 / API 密钥'));
+        fireEvent.click(screen.getByText('总控'));
         expect(screen.queryByTestId('panel-data')).toBeNull();
     });
 
-    it('不跟实盘开关联动：开关关掉时内置面板回凭证页，追加面板仍可点开', () => {
+    it('不跟实盘开关联动：开关关掉时追加面板仍可点开', () => {
         liveFlag = false;
         renderWithPanels(panels);
 
@@ -196,7 +196,7 @@ describe('SettingsCenter 追加面板', () => {
 
         fireEvent.click(screen.getByText('总控'));
         expect(screen.queryByTestId('panel-control')).not.toBeNull();
-        // 闸门只踢内置栏：追加面板选中后不会被 setActiveTab('credentials') 顶掉
-        expect(tabLabels()).toEqual(['接入凭证 / API 密钥', '总控', '数据']);
+        // 闸门只踢内置栏：追加面板选中后不会被迁移说明顶掉
+        expect(tabLabels()).toEqual(['总控', '数据']);
     });
 });

@@ -268,7 +268,7 @@ describe('ComboWorkspace', () => {
     });
     expect(mocks.getDates).toHaveBeenCalledWith('blend-new', 365);
     await waitFor(() =>
-      expect(mocks.getRanking).toHaveBeenCalledWith('blend-new', { date: '2026-10-20' }),
+      expect(mocks.getRanking).toHaveBeenCalledWith('blend-new', { date: '2026-10-20', excludeBlacklist: false }),
     );
   });
 
@@ -292,7 +292,7 @@ describe('ComboWorkspace', () => {
     renderWorkspace();
     await screen.findByText('浦发银行');
     expect(mocks.createBlend).not.toHaveBeenCalled();
-    expect(mocks.getRanking).toHaveBeenCalledWith('blend-1', { date: '2026-10-20' });
+    expect(mocks.getRanking).toHaveBeenCalledWith('blend-1', { date: '2026-10-20', excludeBlacklist: false });
     expect(screen.getAllByText('全13·T+10 等权').length).toBeGreaterThan(0);
   });
 

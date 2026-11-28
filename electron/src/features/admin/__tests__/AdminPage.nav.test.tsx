@@ -1,12 +1,12 @@
 /**
- * 后台管理导航骨架的接线护栏（2026-11-18 评估中心迁入）。
+ * 后台管理导航骨架的接线护栏（2026-11-18 评估中心迁入、2026-11-28 交易黑名单迁入）。
  *
  * 用户可见约定：
- * 1. 「交易核心」组内的顺序是 订单管理 → 风险控制 → **评估中心**（用户原话
- *    「风险控制后面」），评估中心不得缺席、不得排到风险控制之前；
- * 2. 评估中心在后台 shell 右侧内容区真的挂载（路由 `eval` 有 Outlet 出口）。
+ * 1. 「交易核心」组内顺序是 订单管理 → 风险控制 → **交易黑名单** → **评估中心**
+ *    （评估中心用户原话「风险控制后面」；黑名单自模拟交易个人中心迁入，属交易核心）；
+ * 2. 评估中心与交易黑名单都在后台 shell 右侧内容区真的挂载（路由有 Outlet 出口）。
  *
- * 这两条任何一条被改回交易控制台或改错位置，本文件都要红。
+ * 这些约定任何一条被改回交易控制台或改错位置，本文件都要红。
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,7 @@ const renderAdmin = (path: string) =>
                 <Route path="/admin" element={<AdminPage />}>
                     <Route path="eval" element={<div data-testid="pane-eval" />} />
                     <Route path="risk" element={<div data-testid="pane-risk" />} />
+                    <Route path="blacklist" element={<div data-testid="pane-blacklist" />} />
                 </Route>
             </Routes>
         </MemoryRouter>,
@@ -42,17 +43,19 @@ const navLabels = (): string[] =>
     );
 
 describe('后台管理导航（交易核心）', () => {
-    it('交易核心组：订单管理 → 风险控制 → 评估中心', () => {
+    it('交易核心组：订单管理 → 风险控制 → 交易黑名单 → 评估中心', () => {
         renderAdmin('/admin/risk');
         const labels = navLabels();
 
         const orders = labels.indexOf('订单管理');
         const risk = labels.indexOf('风险控制');
+        const blacklist = labels.indexOf('交易黑名单');
         const evalIdx = labels.indexOf('评估中心');
 
         expect(orders).toBeGreaterThanOrEqual(0);
         expect(risk).toBeGreaterThan(orders);
-        expect(evalIdx).toBeGreaterThan(risk);
+        expect(blacklist).toBeGreaterThan(risk);
+        expect(evalIdx).toBeGreaterThan(blacklist);
     });
 
     it('/admin/eval 渲染评估中心面板（不是空白内容区）', () => {
@@ -60,6 +63,13 @@ describe('后台管理导航（交易核心）', () => {
 
         expect(document.querySelector('[data-testid="pane-eval"]')).not.toBeNull();
         // 顶栏面包屑跟随路由（分组名做弱化尾标）
+        expect(document.body.textContent).toContain('交易核心');
+    });
+
+    it('/admin/blacklist 渲染交易黑名单面板（模拟/实盘共用的全局名单）', () => {
+        renderAdmin('/admin/blacklist');
+
+        expect(document.querySelector('[data-testid="pane-blacklist"]')).not.toBeNull();
         expect(document.body.textContent).toContain('交易核心');
     });
 });

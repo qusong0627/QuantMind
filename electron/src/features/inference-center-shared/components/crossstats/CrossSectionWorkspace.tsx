@@ -1,5 +1,5 @@
 /**
- * 截面选股工作区（两种视图）。
+ * 截面排名工作区（两种视图）。
  *
  * - 当日截面：既有全市场打分榜（排序 / 位置过滤 / 名单导出）；
  * - 历史统计：用**测试集**评估当前模型 Top50 的历史选股能力（本次新增）。
@@ -33,6 +33,8 @@ export interface CrossSectionWorkspaceProps {
   horizonDays: number;
   market: string;
   marketLabel?: string;
+  /** 推理中心「排除黑名单」开关：当日榜与历史统计同口径剔除 */
+  excludeBlacklist?: boolean;
 }
 
 const VIEW_HINTS: Record<CrossSectionView, string> = {
@@ -51,6 +53,7 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
   horizonDays,
   market,
   marketLabel,
+  excludeBlacklist = false,
 }) => {
   const [view, setView] = useState<CrossSectionView>('today');
   const [neutralMode, setNeutralMode] = useState(false);
@@ -213,6 +216,7 @@ export const CrossSectionWorkspace: React.FC<CrossSectionWorkspaceProps> = ({
             horizonDays={horizonDays}
             market={market}
             marketLabel={marketLabel}
+            excludeBlacklist={excludeBlacklist}
           />
         )}
       </div>

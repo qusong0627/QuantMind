@@ -1,5 +1,5 @@
 /**
- * 组合选股工作区状态（单一状态源）。
+ * 组合排名工作区状态（单一状态源）。
  *
  * 约定：
  * - 子组件**不各自请求**；一切都从这里拿，避免「榜单刷新了、计划还是旧的」；
@@ -102,7 +102,10 @@ export interface ComboWorkspaceState {
   reloadSnapshot: () => Promise<void>;
 }
 
-export function useComboWorkspace(market: string): ComboWorkspaceState {
+export function useComboWorkspace(
+  market: string,
+  excludeBlacklist = false,
+): ComboWorkspaceState {
   const [blends, setBlends] = useState<BlendRecord[]>([]);
   const [templates, setTemplates] = useState<ComboTemplate[]>([]);
   const [baselineTemplateId, setBaselineTemplateId] = useState<string | null>(null);
@@ -356,7 +359,10 @@ export function useComboWorkspace(market: string): ComboWorkspaceState {
     setRankingLoading(true);
     setRankingError(null);
     const request = isBlendSelection
-      ? blendService.getRanking(selection.id, { date: blendDate ?? undefined })
+      ? blendService.getRanking(selection.id, {
+          date: blendDate ?? undefined,
+          excludeBlacklist,
+        })
       : blendService.preview({
           market,
           model_ids: (selectedTemplate?.members ?? []).map((m) => m.model_id),
@@ -366,6 +372,7 @@ export function useComboWorkspace(market: string): ComboWorkspaceState {
           top: 500,
           min_coverage: selectedTemplate?.min_coverage ?? 2,
           consensus_min_count: selectedTemplate?.consensus_min_count ?? 0,
+          exclude_blacklist: excludeBlacklist,
           // 模板未保存，没有可用日期列表：恒按最新交易日预览
         });
     request
@@ -381,7 +388,7 @@ export function useComboWorkspace(market: string): ComboWorkspaceState {
     return () => {
       alive = false;
     };
-  }, [selection, blendDate, blendDatesReady, hasBlendDates, market, selectedTemplate, rankingNonce]);
+  }, [selection, blendDate, blendDatesReady, hasBlendDates, market, selectedTemplate, rankingNonce, excludeBlacklist]);
 
   // ── 滚动建仓（仅已保存组合，Tab 首次进入才拉）──────────────────────
   useEffect(() => {

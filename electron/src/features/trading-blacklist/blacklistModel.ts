@@ -141,7 +141,7 @@ export function rowBadge(row: BlacklistRow, today: string = todayIso()): RowBadg
     return {
       label: '已放行',
       cls: 'bg-emerald-50 text-emerald-600 border-emerald-200',
-      title: `本人放行${row.manual?.expire ? `，到期日 ${row.manual.expire}` : '（永久）'}：${row.manual?.reason || '未填理由'}`,
+      title: `手工放行${row.manual?.expire ? `，到期日 ${row.manual.expire}` : '（永久）'}：${row.manual?.reason || '未填理由'}`,
     };
   }
   if (row.expired) {
@@ -153,9 +153,9 @@ export function rowBadge(row: BlacklistRow, today: string = todayIso()): RowBadg
   }
   if (kind === 'manual') {
     return {
-      label: '我排除',
+      label: '手工排除',
       cls: 'bg-rose-50 text-rose-600 border-rose-200',
-      title: `本人手工排除：${row.manual?.reason || '未填理由'}`,
+      title: `后台管理手工排除：${row.manual?.reason || '未填理由'}`,
     };
   }
   return {

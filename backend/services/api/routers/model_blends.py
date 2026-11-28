@@ -102,6 +102,7 @@ class PreviewBody(BaseModel):
     min_coverage: int = Field(default=2, ge=1, le=30)
     consensus_min_count: int = Field(default=0, ge=0, le=30)
     weights: dict[str, float] | None = None
+    exclude_blacklist: bool = False
 
 
 class BlendCreateBody(BaseModel):
@@ -207,6 +208,7 @@ async def preview_blend(
             min_coverage=body.min_coverage,
             consensus_min_count=body.consensus_min_count,
             top=body.top,
+            exclude_blacklist=body.exclude_blacklist,
         )
     )
 
@@ -420,6 +422,9 @@ async def get_blend_ranking(
     blend_id: str,
     date_str: str | None = Query(default=None, alias="date"),
     top: int = Query(default=500, ge=1, le=2000),
+    exclude_blacklist: bool = Query(
+        default=False, description="按交易黑名单剔除榜单（推理中心「排除黑名单」开关）"
+    ),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     tenant_id, user_id = _owner(current_user)
@@ -462,6 +467,7 @@ async def get_blend_ranking(
             top=top,
             blend_id=blend_id,
             annotate=True,
+            exclude_blacklist=bool(exclude_blacklist),
         )
     )
     payload["blend_id"] = blend_id

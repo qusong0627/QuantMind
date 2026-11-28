@@ -139,6 +139,8 @@ export interface SelectionStatsResponse {
   points: SelectionStatsPoint[];
   warnings: string[];
   quality: SelectionStatsQuality;
+  /** 推理中心「排除黑名单」口径（未启用时不带或 applied=false） */
+  blacklist?: { applied: boolean; excluded?: number; asof?: string | null };
 }
 
 /** 查询参数：全部可省，后端按模型元数据与测试集全区间补齐 */
@@ -148,4 +150,5 @@ export interface SelectionStatsQuery {
   top_k?: number;
   hold_days?: number;
   capital?: number;
+  exclude_blacklist?: boolean;
 }

@@ -1,18 +1,18 @@
 /**
  * 个人中心（模拟交易）。
  *
- * 版面三段，从「我是谁 / 机器在不在跑」到「我的钱与我的纪律」再到「纪律的具体内容」：
+ * 版面两段，从「我是谁 / 机器在不在跑」到「我的钱与我的纪律」：
  *
  * 1. **身份与运行态**——账户标识、注册时间、交易节点与数据同步的新鲜度；
- * 2. **资金与操作**——总资产 / 可用现金 / 统计基准，外加重置与持仓图片同步；
- * 3. **交易黑名单**——候选信号默认排除的名单，可增删（见 {@link TradingBlacklistPanel}）。
+ * 2. **资金与操作**——总资产 / 可用现金 / 统计基准，外加重置与持仓图片同步。
  *
  * 原先这一页把「账户数字」「重置按钮」「基准校准」全塞进一张叫「其他设置」的卡，
  * 三件事共用一组灰底块，读的人分不清哪个数是状态、哪个是按钮的结果。现在按
- * 「读的 / 做的 / 维护的」分开：状态在卡里只读、动作在卡底成组、名单单独成区。
+ * 「读的 / 做的」分开：状态在卡里只读、动作在卡底成组。
  *
- * 页面自身不再依赖 `flex-1 min-h-0` 的嵌套撑高（黑名单表是可变高的），改成
- * 外层定高 + 内层滚动，底部留实体块给悬浮 Dock 让位。
+ * 交易黑名单已于 2026-11-28 迁到「后台管理 → 交易核心 → 交易黑名单」：那份名单是
+ * 全平台一份（模拟盘与实盘、推送预检、决策轮共用），不是某个账户的私有设置，
+ * 放在个人中心会让用户以为它只作用于当前账户。
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -40,7 +40,6 @@ import { strategyManagementService } from '../../../services/strategyManagementS
 import { userCenterService } from '../../../features/user-center/services/userCenterService';
 import { resolveTradingAccountMode } from '../utils/accountAdapter';
 import { SERVICE_URLS } from '../../../config/services';
-import { TradingBlacklistPanel } from '../../../features/trading-blacklist/TradingBlacklistPanel';
 import { HoldingAlertSettings } from '../../../features/holding-alerts/HoldingAlertSettings';
 
 interface PersonalCenterProps {
@@ -322,7 +321,8 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                 个人中心
                             </h3>
                             <p className="text-xs text-gray-500 mt-1">
-                                账户与运行状态、资金与统计基准、以及候选信号要排除的交易黑名单。
+                                账户与运行状态、资金与统计基准。
+                                交易黑名单已迁至「后台管理 → 交易核心」，模拟盘与实盘共用同一份。
                             </p>
                         </div>
                         <span className="px-2.5 py-1 bg-green-50 text-green-700 text-xs rounded-lg font-bold border border-green-200 flex items-center gap-1.5 shrink-0">
@@ -540,9 +540,6 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
 
                     {/* 第二排：持仓预警设置（左「持仓监控与提醒」/ 右「提醒通道」，两列对称） */}
                     <HoldingAlertSettings />
-
-                    {/* 第三排：交易黑名单（本页的主内容） */}
-                    <TradingBlacklistPanel />
 
                     {/* 给悬浮 Dock 让位。.bottom-dock 是 absolute 覆盖层（z-index 1050，不占布局），
                         必须是**占位的实体块**：给滚动容器加 padding-bottom 不会延伸可滚动区，

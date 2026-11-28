@@ -143,11 +143,17 @@ class BlendService {
 
   async getRanking(
     blendId: string,
-    params: { date?: string; top?: number } = {},
+    params: { date?: string; top?: number; excludeBlacklist?: boolean } = {},
   ): Promise<BlendRankingResponse> {
     const resp = await this.client.get<BlendRankingResponse>(
       `${BASE_PATH}/${blendId}/ranking`,
-      { params: { date: params.date, top: params.top ?? 500 } },
+      {
+        params: {
+          date: params.date,
+          top: params.top ?? 500,
+          ...(params.excludeBlacklist ? { exclude_blacklist: true } : {}),
+        },
+      },
     );
     return resp.data;
   }
@@ -261,7 +267,7 @@ export function blendErrorMessage(error: unknown): string {
       err?.response?.status === 404 &&
       text.toLowerCase() === 'model not found'
     ) {
-      return '组合选股接口未就绪：当前后端为旧版本，请更新后端后重试';
+      return '组合排名接口未就绪：当前后端为旧版本，请更新后端后重试';
     }
     return text;
   }

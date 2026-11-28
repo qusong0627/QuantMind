@@ -2,7 +2,7 @@
 
 ## 接口调用约定
 
-`SettingsCenter.tsx` 中涉及后端调用（例如 QMT Agent 凭证初始化、在线状态查询、配置模板下载）统一使用 `SERVICE_URLS.API_GATEWAY` 作为基地址，再拼接 `/api/v1/...` 路径。
+`SettingsCenter.tsx` / `features/api-keys/ApiKeyPanel.tsx` 中涉及后端调用（例如 QMT Agent 凭证初始化、在线状态查询、配置模板下载）统一使用 `SERVICE_URLS.API_GATEWAY` 作为基地址，再拼接 `/api/v1/...` 路径。
 
 原因：
 
@@ -19,6 +19,7 @@ fetch(`${apiGatewayBase}/api/v1/api-keys/init`, { method: 'POST' });
 
 ## 近期更新
 
+- 2026-11-28：SDK 接入凭证 / API 密钥从本页「设置中心」迁至「后台管理 → 系统设置」（二级菜单第一项为金融情感，第二项为 SDK 接入凭证）；`SettingsCenter.tsx` 只留券商通道 / 真单镜像与调用方追加面板，无实盘配置时显示迁移说明。
 - `StrategyManagement.tsx` 里的“手动执行调试”已改名为“手动任务”，并迁移为左侧功能菜单中的独立页面；原页内 Drawer 仅保留兼容代码，不再作为主入口。
 - 实盘策略管理的策略选择下拉已从原生 `<select>` 改为 `antd Select`，弹层圆角、阴影和高亮态已统一到项目视觉语言。
 - `SettingsCenter.tsx` 已移除底部“独立部署说明”说明卡，避免与底部导航区域发生遮挡。

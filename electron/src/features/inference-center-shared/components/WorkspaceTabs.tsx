@@ -3,7 +3,7 @@
  *
  * 机构级推理平台的四类使用场景在**操作节奏**上完全不同，混在一屏里会让每一类都别扭：
  *   - 单票研判：慢，反复调参看同一只票（改基准日 / 换模型 / 换周期）
- *   - 截面选股：快，扫全市场找标的（排序 / 过滤 / 导出）
+ *   - 截面排名：快，扫全市场做排序（排序 / 过滤 / 导出）
  *   - 模型治理：离线，审模型资产（哪个模型能出区间、哪个归因不可用、哪个批次失败）
  *   - 晋升流程：更慢，挑战者从回放评估到观察期到晋升/回滚的全生命周期台账（P2 §5.3）
  *
@@ -32,13 +32,13 @@ export const WORKSPACES: WorkspaceMeta[] = [
   },
   {
     key: 'cross',
-    label: '截面选股',
+    label: '截面排名',
     hint: '全市场截面打分排序、信号过滤与名单导出',
     icon: Table2,
   },
   {
     key: 'combo',
-    label: '组合选股',
+    label: '组合排名',
     hint: '同特征多模型组合的截面榜单与纸面调仓计划',
     icon: Layers,
   },
@@ -61,7 +61,7 @@ interface WorkspaceTabsProps {
   onChange: (key: WorkspaceKey) => void;
   /** 每个工作区右上角的小角标（如截面行数、模型数）；缺省不显示 */
   badges?: Partial<Record<WorkspaceKey, string>>;
-  /** 组合选股能力位：未开通的市场不渲染该 Tab */
+  /** 组合排名能力位：未开通的市场不渲染该 Tab */
   supportsCombo?: boolean;
 }
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import re
 import time
 from datetime import date, datetime, timedelta
@@ -67,6 +68,7 @@ from backend.services.api.routers.external.datasets import (
     blob_file,
     dataset_dir,
     etag_of,
+    get_partition_dataset,
     list_partitions,
     normalize_partition,
     partition_date_ts,
@@ -111,6 +113,28 @@ _SENSITIVE_COLUMN_RE = re.compile(
 # 全部是**有类型的具名模型**：对外接口的 schema 就是给机器生成客户端用的
 # 说明书，裸 `dict[str, Any]` 在 OpenAPI 里会退化成一团 `additionalProperties`
 # ——字段改名要等对面运行时报错才发现（见 README「给改这个目录的人」）。
+
+
+class DatasetColumn(BaseModel):
+    name: str
+    type: str
+
+
+class DatasetSchemaResponse(BaseModel):
+    dataset: str
+    columns: list[DatasetColumn]
+    time_column: str | None = Field(
+        None, description="可用于日期过滤的时间列；null = 该数据集没有日期列"
+    )
+
+
+class QueryResponse(BaseModel):
+    dataset: str
+    as_of: str | None
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    row_count: int
+    truncated: bool
 
 
 class DatasetEntry(BaseModel):
@@ -463,6 +487,290 @@ async def list_datasets(
         server_time=time.time(),
         datasets=[*file_entries, *row_entries],
     )
+
+
+# ---------------------------------------------------------------------------
+# 有界查询（MCP v1：让 AI 读小切片，不下整份 parquet）
+# ---------------------------------------------------------------------------
+
+MAX_QUERY_COLUMNS = 50
+MAX_QUERY_ROWS = 5000
+MAX_QUERY_DAYS = 366
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TIME_COLUMN_NAMES = ("time", "trade_date", "date", "datetime", "ts", "trade_time")
+
+
+def _escaped_path(path: Any) -> str:
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _read_dataset_schema_sync(name: str) -> tuple[list[dict[str, str]], str | None]:
+    """读一个分区文件的 parquet 脚注拿列名/类型（不读行）。"""
+    ds = get_partition_dataset(name)
+    if ds is None:
+        raise KeyError(name)
+    partitions = list_partitions(ds)
+    if not partitions:
+        return [], None
+    path = partition_file(ds, partitions[-1])
+    if path is None or not path.is_file():
+        return [], None
+
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        rows = con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet({_escaped_path(path)})"
+        ).fetchall()
+    finally:
+        con.close()
+    columns = [{"name": str(row[0]), "type": str(row[1])} for row in rows]
+    time_column = _pick_time_column(columns)
+    return columns, time_column
+
+
+def _pick_time_column(columns: list[dict[str, str]]) -> str | None:
+    for name in _TIME_COLUMN_NAMES:
+        for col in columns:
+            if col["name"].lower() == name and (
+                "DATE" in col["type"].upper() or "TIME" in col["type"].upper()
+            ):
+                return col["name"]
+    for col in columns:
+        if "TIMESTAMP" in col["type"].upper() or col["type"].upper() == "DATE":
+            return col["name"]
+    return None
+
+
+def _safe_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return _safe_value(value.item())
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _query_dataset_sync(
+    *,
+    name: str,
+    columns: list[str],
+    start: str | None,
+    end: str | None,
+    symbols: list[str] | None,
+    limit: int,
+) -> dict[str, Any]:
+    from backend.shared.stock_utils import StockCodeUtil
+
+    ds = get_partition_dataset(name)
+    if ds is None:
+        raise KeyError(name)
+    schema, time_column = _read_dataset_schema_sync(name)
+    schema_by_lower = {col["name"].lower(): col for col in schema}
+    selected: list[str] = []
+    for raw in columns:
+        col = schema_by_lower.get(raw.lower())
+        if col is None:
+            raise ValueError(f"未知列：{raw}")
+        if not _IDENT_RE.fullmatch(col["name"]):
+            raise ValueError(f"列名不合法：{col['name']}")
+        selected.append(col["name"])
+    if not selected:
+        raise ValueError("columns 不能为空")
+
+    partitions = list_partitions(ds, since=start, until=end)
+    if not partitions:
+        return {
+            "dataset": name,
+            "as_of": None,
+            "columns": selected,
+            "rows": [],
+            "row_count": 0,
+            "truncated": False,
+        }
+    if not start and not end and len(partitions) > 10:
+        # 不传日期时只看最近 10 个分区：避免一次查询扫两千个 l2_factors 文件
+        partitions = partitions[-10:]
+    if len(partitions) > MAX_QUERY_DAYS:
+        raise ValueError(f"日期范围过大（{len(partitions)} 个分区，最多 {MAX_QUERY_DAYS}）")
+
+    paths = []
+    for part in partitions:
+        path = partition_file(ds, part)
+        if path is not None and path.is_file():
+            paths.append(path)
+    if not paths:
+        return {
+            "dataset": name,
+            "as_of": None,
+            "columns": selected,
+            "rows": [],
+            "row_count": 0,
+            "truncated": False,
+        }
+
+    params: list[Any] = []
+    where: list[str] = []
+    time_type = ""
+    if time_column:
+        time_type = next(
+            (col["type"].upper() for col in schema if col["name"] == time_column), ""
+        )
+        cast_type = "DATE" if time_type == "DATE" else "TIMESTAMP"
+        if start:
+            where.append(f'"{time_column}" >= CAST(? AS {cast_type})')
+            params.append(start)
+        if end:
+            # end 是「含当天」，timestamp 列不能直接 <= 当天 00:00（会漏掉当天盘中）
+            where.append(f'"{time_column}" < CAST(? AS DATE) + INTERVAL 1 DAY')
+            params.append(end)
+
+    symbol_column = next(
+        (col["name"] for col in schema if col["name"].lower() == "symbol"), None
+    )
+    if symbols and not symbol_column:
+        raise ValueError("该数据集没有 symbol 列，不能按标的过滤")
+    if symbols and symbol_column:
+        normalized: set[str] = set()
+        for sym in symbols:
+            suffix = StockCodeUtil.to_suffix(str(sym).strip())
+            if not suffix:
+                continue
+            normalized.add(suffix)
+            normalized.add(suffix.split(".")[0])
+            prefix = StockCodeUtil.to_prefix(str(sym).strip())
+            if prefix:
+                normalized.add(prefix)
+        ordered = sorted(normalized)
+        if not ordered:
+            raise ValueError("symbols 没有有效代码")
+        where.append(
+            f'"{symbol_column}" IN ({", ".join("?" for _ in ordered)})'
+        )
+        params.extend(ordered)
+
+    order_by = f' ORDER BY "{time_column}" ASC' if time_column else ""
+    select_sql = ", ".join('"' + col + '"' for col in selected)
+    sql = (
+        f"SELECT {select_sql} "
+        f"FROM read_parquet([{', '.join(_escaped_path(p) for p in paths)}])"
+        + (f" WHERE {' AND '.join(where)}" if where else "")
+        + order_by
+        + " LIMIT ?"
+    )
+    params.append(int(limit) + 1)
+
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        result = con.execute(sql, params)
+        column_names = [desc[0] for desc in result.description]
+        raw_rows = result.fetchall()
+    finally:
+        con.close()
+
+    truncated = len(raw_rows) > int(limit)
+    raw_rows = raw_rows[: int(limit)]
+    rows = [
+        {
+            column_names[i]: _safe_value(row[i])
+            for i in range(len(column_names))
+        }
+        for row in raw_rows
+    ]
+    latest = partitions[-1]
+    as_of = f"{latest[0:4]}-{latest[4:6]}-{latest[6:8]}" if len(latest) == 8 else latest
+    return {
+        "dataset": name,
+        "as_of": as_of,
+        "columns": selected,
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": truncated,
+    }
+
+
+@router.get("/datasets/{name}/schema", response_model=DatasetSchemaResponse)
+async def get_dataset_schema(
+    name: str,
+    principal: ExternalPrincipal = Depends(require_external_principal),
+) -> DatasetSchemaResponse:
+    _ = principal
+    try:
+        columns, time_column = await run_in_threadpool(_read_dataset_schema_sync, name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="dataset_not_found") from None
+    if not columns:
+        raise HTTPException(status_code=404, detail="dataset_has_no_partitions")
+    return DatasetSchemaResponse(
+        dataset=name,
+        columns=[DatasetColumn(**col) for col in columns],
+        time_column=time_column,
+    )
+
+
+@router.get("/query", response_model=QueryResponse)
+async def query_dataset(
+    dataset: str = Query(..., description="分区数据集名（见 /data/datasets）"),
+    columns: str = Query(..., description="逗号分隔的列名（最多 50 列）"),
+    start: str | None = Query(None, description="起始日期 YYYY-MM-DD（含）"),
+    end: str | None = Query(None, description="结束日期 YYYY-MM-DD（含）"),
+    symbols: str | None = Query(None, description="逗号分隔的标的代码（最多 100 个）"),
+    limit: int = Query(500, ge=1, le=MAX_QUERY_ROWS, description="返回行数上限"),
+    principal: ExternalPrincipal = Depends(require_external_principal),
+) -> QueryResponse:
+    """有界查询：只读、参数化、行数/列数/日期范围都封顶。
+
+    不让外部执行任意 SQL；列必须存在于数据集 schema，排序固定按时间升序。
+    """
+    _ = principal
+    if get_partition_dataset(dataset) is None:
+        raise HTTPException(status_code=404, detail="dataset_not_found")
+    cols = [col.strip() for col in columns.split(",") if col.strip()]
+    if len(cols) > MAX_QUERY_COLUMNS:
+        raise HTTPException(
+            status_code=400, detail=f"columns 最多 {MAX_QUERY_COLUMNS} 列"
+        )
+    syms = (
+        [sym.strip() for sym in symbols.split(",") if sym.strip()]
+        if symbols
+        else None
+    )
+    if syms and len(syms) > 100:
+        raise HTTPException(status_code=400, detail="symbols 最多 100 个")
+    for value, label in ((start, "start"), (end, "end")):
+        if value and normalize_partition(value) is None:
+            raise HTTPException(status_code=400, detail=f"{label} 必须是 YYYY-MM-DD")
+    try:
+        payload = await run_in_threadpool(
+            _query_dataset_sync,
+            name=dataset,
+            columns=cols,
+            start=start,
+            end=end,
+            symbols=syms,
+            limit=limit,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="dataset_not_found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - 查询失败要明确报 500
+        logger.warning("[ExtData] query failed dataset=%s: %s", dataset, exc)
+        raise HTTPException(status_code=500, detail="query_failed") from exc
+    return QueryResponse(**payload)
 
 
 # ---------------------------------------------------------------------------

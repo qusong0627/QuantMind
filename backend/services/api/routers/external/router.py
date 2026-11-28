@@ -36,6 +36,8 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.services.api.routers.external import control as control_plane
 from backend.services.api.routers.external import data as data_plane
+from backend.services.api.routers.external import inference as inference_plane
+from backend.services.api.routers.external import mcp as mcp_plane
 from backend.services.api.routers.external import task as task_plane
 from backend.services.api.routers.external import trading as trading_plane
 from backend.services.api.routers.external.auth import (
@@ -456,6 +458,8 @@ router.include_router(data_plane.router, prefix="/data")
 router.include_router(control_plane.router, prefix="/control")
 router.include_router(task_plane.router, prefix="/task")
 router.include_router(trading_plane.router, prefix="/trading")
+router.include_router(mcp_plane.router, prefix="/mcp")
+router.include_router(inference_plane.router, prefix="/inference")
 
 
 __all__ = [

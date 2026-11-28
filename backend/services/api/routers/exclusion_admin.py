@@ -1,6 +1,9 @@
-"""排除名单维护（个人中心「交易黑名单」表格）。
+"""排除名单维护（后台管理 · 交易核心「交易黑名单」表格）。
 
-候选列表读的是**合并视图**（机器基线 + 用户层），这里维护的是**用户层**那一半：
+名单是**全平台一份**：模拟盘/实盘的候选信号、推送预检、决策轮共用同一份产物，
+维护入口放在后台管理，不归任何一个交易界面或单个账户。
+
+候选列表读的是**合并视图**（机器基线 + 管理员手工层），这里维护的是**手工层**那一半：
 手工加入（``block``）与例外放行（``allow``）。机器基线 ``data/exclusions/cn.json``
 由导入器整份覆盖写，界面上**只读**——可以直接放行其中某一只，但不能删它，
 因为下一次导入会把它带回来，而「删了又回来」比「根本删不掉」更让人困惑。
@@ -220,12 +223,49 @@ def _row(symbol: str, hit: Any, manual: Any) -> dict[str, Any]:
     }
 
 
+@router.get("/symbols")
+async def blocking_symbols(
+    market: str = Query("CN"),
+    current_user: dict = Depends(get_current_user),
+):
+    """当前生效（blocking 且未过期）的排除代码集合（后缀式）。
+
+    给推理中心「排除黑名单」这类**读侧开关**用：列表/单票只需要一份代码集合，
+    不该为 1,900 行名单翻 10 页 `/entries`。名单未导入时 `imported=false`，
+    调用方必须显式展示而不是当成空名单。
+    """
+    _ = current_user
+    mk = _check_market(market)
+    lst = load_exclusion_list(mk)
+    if lst is None:
+        return {
+            "success": True,
+            "data": {
+                "imported": False,
+                "reason": "名单文件未导入（data/exclusions/cn.json）",
+                "asof": None,
+                "count": 0,
+                "symbols": [],
+            },
+        }
+    symbols = sorted(lst.symbols())
+    return {
+        "success": True,
+        "data": {
+            "imported": True,
+            "asof": lst.asof,
+            "count": len(symbols),
+            "symbols": symbols,
+        },
+    }
+
+
 @router.get("/meta")
 async def exclusion_meta(
     market: str = Query("CN"),
     current_user: dict = Depends(get_current_user),
 ):
-    """两层条数 + 基准日 + 陈旧度（个人中心表格顶部与候选页风险条共用）。"""
+    """两层条数 + 基准日 + 陈旧度（后台管理表格顶部与候选页风险条共用）。"""
     _ = current_user
     mk = _check_market(market)
     lst = load_exclusion_list(mk)
