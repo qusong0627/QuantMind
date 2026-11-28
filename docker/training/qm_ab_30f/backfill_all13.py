@@ -23,6 +23,8 @@ import os
 # ENABLE_TDX_PUSH=true 时 InferenceScriptRunner 会推送通达信选股并执行滚动买卖；
 # 批量补历史日绝不能下真单/触发滚动，且桥不可达时每天都会等超时。
 os.environ["ENABLE_TDX_PUSH"] = "false"
+# 同一模型的多个交易日并发推理（各日独立子进程，互不冲突）；默认 1 是安全值。
+os.environ["BACKFILL_DAY_WORKERS"] = "4"
 
 from sqlalchemy import text
 

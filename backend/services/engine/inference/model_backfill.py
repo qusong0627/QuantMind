@@ -587,12 +587,15 @@ async def run_one_model(
     task_id: str | None = None,
     failure_limit: int = CONSECUTIVE_FAILURE_LIMIT,
 ) -> ModelRunResult:
-    """单模型批量补推：模型只加载一次、所有缺口日只合并一次 pred.parquet。
+    """单模型批量补推：所有缺口日只合并一次 pred.parquet。
 
     逐日 ``run_one_day`` 每天都要把 5.8M 行的 pred.parquet 读进来再整份写回；
     13 模型 × 21 日 = 273 次全量读写，是补推慢的主因。本函数把同一模型的
     所有缺口日信号先收集起来，最后调一次 ``merge_signals_into_pred``（其本身
     支持 ``[(day, signals), ...]`` 多日一次合并），把 273 次压到 13 次。
+
+    ``BACKFILL_DAY_WORKERS``（默认 1）可把同一模型的多个交易日并发推理；
+    各日是独立子进程、写各自的 run 记录，只读模型目录，互不冲突。
     """
     days = sorted(str(day) for day in gap_dates)
     summary = ModelRunResult(
@@ -605,86 +608,110 @@ async def run_one_model(
     pending: list[tuple[str, list[dict]]] = []
     consecutive_failures = 0
     cancelled = False
+    workers = max(1, int(os.getenv("BACKFILL_DAY_WORKERS", "1") or "1"))
+    logger.info(
+        "backfill %s: days=%d day_workers=%d", model.model_id, len(days), workers
+    )
 
-    for index, day in enumerate(days):
+    for start in range(0, len(days), workers):
         if should_cancel is not None and await should_cancel():
             cancelled = True
             break
+        chunk = days[start : start + workers]
         started = time.monotonic()
-        try:
-            result, signals = await asyncio.to_thread(
-                _infer_sync, model, day, tenant_id, user_id, redis_client
-            )
-        except Exception as exc:  # noqa: BLE001 - 单日异常不打断整模型
-            logger.warning("backfill %s %s runner 异常: %s", model.model_id, day, exc)
-            result, signals = None, []
+        outcomes = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    _infer_sync, model, day, tenant_id, user_id, redis_client
+                )
+                for day in chunk
+            ),
+            return_exceptions=True,
+        )
         duration_ms = int((time.monotonic() - started) * 1000)
 
-        fallback_reason = str(getattr(result, "fallback_reason", "") or "")
-        if result is not None and "LOCK_HELD" in fallback_reason:
-            summary.days_skipped += 1
-            consecutive_failures = 0
-            day_result = DayResult(
-                model_id=model.model_id,
-                day=day,
-                status="skipped_lock",
-                error=fallback_reason,
-                duration_ms=duration_ms,
-            )
-        elif result is None or not getattr(result, "success", False):
-            if result is not None:
-                await _record_failed_run(model, day, tenant_id, user_id, result, task_id)
-            summary.days_failed += 1
-            consecutive_failures += 1
-            error = str(getattr(result, "error", "") or "推理失败")
-            if len(summary.errors) < 20:
-                summary.errors.append({"date": day, "error": error})
-            day_result = DayResult(
-                model_id=model.model_id,
-                day=day,
-                status="failed",
-                signals_count=int(getattr(result, "signals_count", 0) or 0),
-                run_id=str(getattr(result, "run_id", "") or "") if result is not None else "",
-                error=error,
-                failure_stage=(
-                    str(getattr(result, "failure_stage", "") or "")
-                    if result is not None
-                    else ""
-                ),
-                duration_ms=duration_ms,
-            )
-        else:
-            summary.days_completed += 1
-            consecutive_failures = 0
-            pending.append((day, signals))
-            day_result = DayResult(
-                model_id=model.model_id,
-                day=day,
-                status="completed",
-                signals_count=len(signals),
-                run_id=str(getattr(result, "run_id", "") or ""),
-                duration_ms=duration_ms,
-            )
+        for offset, (day, outcome) in enumerate(zip(chunk, outcomes)):
+            if isinstance(outcome, Exception):
+                logger.warning(
+                    "backfill %s %s runner 异常: %s", model.model_id, day, outcome
+                )
+                result, signals = None, []
+            else:
+                result, signals = outcome
 
-        await _emit(
-            progress_cb,
-            {
-                "type": "day",
-                "model_id": model.model_id,
-                "day": day,
-                "index": index,
-                "days_total": len(days),
-                "result": {
-                    "status": day_result.status,
-                    "signals_count": day_result.signals_count,
-                    # 合并推迟到模型结束：单日事件先报 0，days_merged 在收尾更新
-                    "merged_rows": 0,
-                    "error": day_result.error,
-                    "duration_ms": day_result.duration_ms,
+            fallback_reason = str(getattr(result, "fallback_reason", "") or "")
+            if result is not None and "LOCK_HELD" in fallback_reason:
+                summary.days_skipped += 1
+                consecutive_failures = 0
+                day_result = DayResult(
+                    model_id=model.model_id,
+                    day=day,
+                    status="skipped_lock",
+                    error=fallback_reason,
+                    duration_ms=duration_ms,
+                )
+            elif result is None or not getattr(result, "success", False):
+                if result is not None:
+                    await _record_failed_run(
+                        model, day, tenant_id, user_id, result, task_id
+                    )
+                summary.days_failed += 1
+                consecutive_failures += 1
+                error = str(getattr(result, "error", "") or "推理失败")
+                if len(summary.errors) < 20:
+                    summary.errors.append({"date": day, "error": error})
+                day_result = DayResult(
+                    model_id=model.model_id,
+                    day=day,
+                    status="failed",
+                    signals_count=int(getattr(result, "signals_count", 0) or 0),
+                    run_id=(
+                        str(getattr(result, "run_id", "") or "")
+                        if result is not None
+                        else ""
+                    ),
+                    error=error,
+                    failure_stage=(
+                        str(getattr(result, "failure_stage", "") or "")
+                        if result is not None
+                        else ""
+                    ),
+                    duration_ms=duration_ms,
+                )
+            else:
+                summary.days_completed += 1
+                consecutive_failures = 0
+                pending.append((day, signals))
+                day_result = DayResult(
+                    model_id=model.model_id,
+                    day=day,
+                    status="completed",
+                    signals_count=len(signals),
+                    run_id=str(getattr(result, "run_id", "") or ""),
+                    duration_ms=duration_ms,
+                )
+
+            await _emit(
+                progress_cb,
+                {
+                    "type": "day",
+                    "model_id": model.model_id,
+                    "day": day,
+                    "index": start + offset,
+                    "days_total": len(days),
+                    "result": {
+                        "status": day_result.status,
+                        "signals_count": day_result.signals_count,
+                        # 合并推迟到模型结束：单日事件先报 0，days_merged 在收尾更新
+                        "merged_rows": 0,
+                        "error": day_result.error,
+                        "duration_ms": day_result.duration_ms,
+                    },
+                    "model": summary.as_dict(),
                 },
-                "model": summary.as_dict(),
-            },
-        )
+            )
+            if consecutive_failures >= failure_limit:
+                break
         if consecutive_failures >= failure_limit:
             break
 
