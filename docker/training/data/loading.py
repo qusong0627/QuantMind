@@ -905,6 +905,12 @@ def load_data(
             _eval_col,
         )
 
+    # 评估可交易性（次日开盘/收盘涨跌停）需要原始开/收盘价随 pred_df 落盘；
+    # 只作评估列，不参与训练（features 白名单不含它们）。
+    for _price_col in ("open", "close"):
+        if _price_col in narrow.columns and _price_col not in _label_extra_cols:
+            _label_extra_cols.append(_price_col)
+
     logger.info(
         "Label built with target_horizon_days=%s execution_price=%s (%s)",
         _horizon,
