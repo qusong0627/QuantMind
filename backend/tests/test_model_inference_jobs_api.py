@@ -319,6 +319,39 @@ def test_legacy_backfill_up_to_date_skips_job(monkeypatch):
     }
 
 
+def test_legacy_backfill_blocked_when_factor_stale(monkeypatch):
+    from backend.services.api.routers import model_training as mt
+
+    async def fake_resolve(tenant_id, user_id, model_id):
+        return _model()
+
+    async def fail_create(**_kwargs):
+        raise AssertionError("因子未物化时不应创建必然失败的任务")
+
+    monkeypatch.setattr(mt, "resolve_backfill_model", fake_resolve)
+    monkeypatch.setattr(
+        mt,
+        "compute_coverage",
+        lambda model: _coverage(
+            [],
+            factor_source="fused189",
+            factor_latest_date="2026-10-10",
+            market_latest_date="2026-10-16",
+            factor_lag_days=4,
+            factor_stale=True,
+        ),
+    )
+    monkeypatch.setattr(mt, "create_job", fail_create)
+    payload = _run(
+        mt.trigger_backfill("mdl_1", {"tenant_id": "default", "user_id": "u1"})
+    )
+    assert payload["status"] == "blocked"
+    assert payload["gap"] == 0
+    assert payload["factor_source"] == "fused189"
+    assert payload["factor_lag_days"] == 4
+    assert "不是模型坏了" in payload["message"]
+
+
 def test_legacy_backfill_creates_single_model_job(monkeypatch):
     from backend.services.api.routers import model_training as mt
 

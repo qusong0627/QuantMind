@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Tag, Typography, Spin, Empty, Collapse, Progress, Modal, message } from 'antd';
+import { Alert, Button, Card, Tag, Typography, Spin, Empty, Collapse, Progress, Modal, message } from 'antd';
 import { Database, Calendar, RefreshCw, Zap, CheckCircle2, AlertTriangle, Clock } from 'lucide-react';
 import { modelTrainingService } from '../services/modelTrainingService';
 
@@ -141,12 +141,14 @@ export const InferenceCoveragePanel: React.FC<InferenceCoveragePanelProps> = ({ 
           const taskId = res?.task_id || res?.taskId;
           if (!taskId) {
             if (res?.status === 'completed' && res?.gap === 0) message.info(res?.message || '已是最新，无需补全');
+            else if (res?.status === 'blocked') message.warning(res?.message || '因子源未更新，暂无法补全');
             else if (res?.status === 'failed') message.error(res?.error || res?.message || '触发失败');
             else message.success(res?.message || '已触发补全');
             setBackfilling(false);
             void load();
             return;
           }
+          if (res?.warning) message.warning(res.warning);
           localStorage.setItem(STORAGE_KEY(modelId), taskId);
           // 轮询
           const poll = async () => {
@@ -185,6 +187,14 @@ export const InferenceCoveragePanel: React.FC<InferenceCoveragePanelProps> = ({ 
   return (
     <div className="space-y-4">
       <style>{`.inference-backfill-modal-wrap .ant-modal{top:200px !important;} .inference-backfill-modal-wrap.ant-modal-wrap{padding-top:100px;}`}</style>
+      {coverage?.factor_stale && (
+        <Alert
+          type="warning"
+          showIcon
+          message={`因子源 ${coverage?.factor_source ?? '—'} 落后 ${coverage?.factor_lag_days ?? 0} 个交易日`}
+          description={coverage?.factor_stale_message || `因子源最新 ${coverage?.factor_latest_date ?? '—'}，市场最新 ${coverage?.market_latest_date ?? '—'}；这不是模型坏了，请先物化该因子库。`}
+        />
+      )}
       <Card size="small" className="rounded-2xl">
         <Collapse
           ghost
@@ -212,7 +222,7 @@ export const InferenceCoveragePanel: React.FC<InferenceCoveragePanelProps> = ({ 
           <div className="text-[11px] text-slate-400 font-bold">最新交易日</div>
           <div className="text-lg font-mono font-black text-slate-800">{coverage?.latest_trade_date ?? '—'}</div>
           <div className="text-[11px] mt-1 flex items-center justify-center gap-1">
-            {isUpToDate ? <><CheckCircle2 size={12} className="text-emerald-500"/> <span className="text-emerald-600 font-bold">已是最新</span></> : <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">缺口 {gapCount} 日</span></>}
+            {coverage?.factor_stale ? <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">因子落后 {coverage?.factor_lag_days ?? 0} 日</span></> : isUpToDate ? <><CheckCircle2 size={12} className="text-emerald-500"/> <span className="text-emerald-600 font-bold">已是最新</span></> : <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">缺口 {gapCount} 日</span></>}
           </div>
         </Card>
         <Card size="small" className="rounded-2xl text-center">

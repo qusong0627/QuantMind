@@ -233,6 +233,17 @@ if os.getenv("MARKET_TIMING_V2_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="10", hour="17", day_of_week="1-5"),
     }
 
+# fused* 自定义数据集缺口补齐（2026-11-28）：fused189 是训练时物化的快照，
+# 推理端按 dt 直读；快照停在训练日会让默认模型补推全部报「最新可用 … 超出
+# 数据范围」。04:30 = CUSTOM 数据集 03:00 全量重建（实测 40–60 分钟）之后、
+# 08:00 盘前自动推理之前；含周六，周五行情的分区常在周六早上才落齐。
+# 任务幂等：只补股票池来源库已有分区的交易日，失败不阻断其它定时链。
+if os.getenv("FUSED_DATASET_EXTEND_ENABLED", "true").lower() == "true":
+    beat_schedule["fused-dataset-extend-daily"] = {
+        "task": "engine.tasks.extend_fused_datasets",
+        "schedule": crontab(minute="30", hour="4", day_of_week="1-6"),
+    }
+
 # 天风 50 因子日频物化：数据同步时间由用户在前端配置（常见次日 00:00 后），
 # 所以这里给 06:30/07:30/08:30/09:30 四个幂等重试点——脚本先查库内最大 dt，
 # 已是最新就秒退；同步晚到也能在盘中前补上。引擎在

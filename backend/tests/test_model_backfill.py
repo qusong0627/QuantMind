@@ -73,7 +73,29 @@ def test_coverage_without_pred_uses_quantdb_range(tmp_path, monkeypatch):
     assert coverage.estimated is True
     assert coverage.source == "quantdb_fallback"
     assert coverage.count == 2
-    assert list(coverage.gap_dates) == ["2026-10-14", "2026-10-15", "2026-10-16"]
+    assert coverage.max_date == "2026-10-13"
+    assert coverage.factor_latest_date == "2026-10-13"
+    assert coverage.factor_stale is True
+    assert coverage.factor_lag_days == 3
+    # 因子源只到 10-13，10-14~10-16 不是「补推缺口」，而是因子未物化
+    assert coverage.gap_dates == ()
+
+
+def test_factor_stale_message_explains_its_the_data_not_the_model(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        mb,
+        "_quantdb_available_dates",
+        lambda model: ("fused189", ["2026-10-12", "2026-10-13"]),
+    )
+    coverage = mb.compute_coverage(
+        _model(tmp_path), latest=date(2026, 10, 21), cutoff=date(2026, 10, 16)
+    )
+    message = mb.factor_stale_message(coverage)
+    assert "fused189" in message
+    assert "2026-10-13" in message
+    assert "不是模型坏了" in message
 
 
 def test_coverage_without_any_source_reports_reason(tmp_path, monkeypatch):

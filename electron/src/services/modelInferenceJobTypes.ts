@@ -18,6 +18,10 @@ export interface BackfillPreviewModel {
   status: string;
   latest_data_date: string | null;
   gap_count: number;
+  factor_source?: string | null;
+  factor_latest_date?: string | null;
+  factor_lag_days?: number;
+  factor_stale?: boolean;
   estimated_seconds: number;
   eligible: boolean;
   reason: string | null;

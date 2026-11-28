@@ -1458,6 +1458,45 @@ def run_custom_dataset_rebuild(market: str, cfg: dict[str, Any]) -> dict[str, An
 
 
 @celery_app.task(
+    name="engine.tasks.extend_fused_datasets",
+    # 纯本地磁盘作业：每个 fused 数据集只补「股票池来源库已有分区」的缺口日，
+    # 正常 1~3 分钟；给 30 分钟预算，避免慢盘把任务拖成僵尸。
+    soft_time_limit=int(os.getenv("FUSED_EXTEND_SOFT_TIME_LIMIT", "1800")),
+    time_limit=int(os.getenv("FUSED_EXTEND_TIME_LIMIT", "2100")),
+    acks_late=False,
+    reject_on_worker_lost=False,
+)
+def extend_fused_datasets_task() -> dict[str, Any]:
+    """把 fused* 自定义数据集的缺口分区从来源库补齐（03:00 CUSTOM 重建之后）。
+
+    默认模型直读 fused189；快照停在训练日时，模型管理里的补推会全部报
+    「QuantDB fused189 最新可用 ... 超出数据范围」。本任务幂等，失败不阻断
+    其它定时链。
+    """
+    try:
+        from backend.scripts.extend_fused_dataset import extend_all
+
+        results = extend_all()
+        for item in results:
+            logger.info(
+                "[FusedDataset] %s status=%s written=%s targets=%s missing=%s",
+                item.get("dataset"),
+                item.get("status"),
+                item.get("written"),
+                item.get("targets"),
+                sorted((item.get("missing_features") or {}).keys()),
+            )
+        failed = [item for item in results if item.get("status") == "failed"]
+        return {
+            "status": "partial" if failed else "ok",
+            "results": results,
+        }
+    except Exception as e:  # noqa: BLE001 - 定时任务失败只告警
+        logger.exception("[FusedDataset] 缺口补齐失败: %s", e)
+        return {"status": "failed", "error": str(e)}
+
+
+@celery_app.task(
     name="engine.tasks.run_factor_fill_scheduled",
     # 纯本地磁盘作业（不请求上游）：l1/south 增量秒级，ccass 落后时全量重算
     # 分钟级。与市场同步同样的「超时被杀不重入队」纪律（acks_late=False +

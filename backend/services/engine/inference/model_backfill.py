@@ -75,10 +75,28 @@ class BackfillCoverage:
     source: str = "pred"
     reason: str | None = None
     count: int = 0
+    factor_source: str | None = None
+    factor_latest_date: str | None = None
+    market_latest_date: str | None = None
+    factor_lag_days: int = 0
+    factor_stale: bool = False
 
     @property
     def gap_count(self) -> int:
         return len(self.gap_dates)
+
+
+def factor_stale_message(coverage: BackfillCoverage) -> str:
+    """因子源落后市场时给用户的人话；不是模型坏了。"""
+    if not coverage.factor_stale:
+        return ""
+    return (
+        f"因子源 {coverage.factor_source} 最新只有 {coverage.factor_latest_date}，"
+        f"落后市场 {coverage.factor_lag_days} 个交易日"
+        f"（市场最新 {coverage.market_latest_date}）。"
+        "这不是模型坏了：请先物化该因子库再推理；fused* 已配置每日 04:30 自动补齐，"
+        "其他因子库见「数据管理」对应同步/物化任务。"
+    )
 
 
 @dataclass(frozen=True)
@@ -310,8 +328,13 @@ def _quantdb_available_dates(model: BackfillModel) -> tuple[str, list[str]]:
             QuantDBFactorReader,
             market_data_dir,
         )
+        from backend.shared.quantdb_paths import resolve_pinned_data_dir
 
-        qdir = market_data_dir(market)
+        # 必须与推理执行端同一口径：metadata.quantdb_dir 优先（fused*/自定义库
+        # 不在市场默认目录下），否则 available_dates 会读错库、把 freshness
+        # 误报成「无数据」。pin 不可采纳时回落市场默认目录（与运行端一致）。
+        pinned = resolve_pinned_data_dir(model.metadata.get("quantdb_dir"))
+        qdir = Path(pinned) if pinned else market_data_dir(market)
         if not qdir.is_dir():
             return factor_source, []
         reader = QuantDBFactorReader(qdir, market=market)
@@ -332,11 +355,42 @@ def compute_coverage(
     """计算覆盖与缺口。
 
     ``latest`` / ``cutoff`` 仅供测试注入；生产按「最近交易日」与
-    「QuantDB 因子已产出日」双上限收敛。
+    「QuantDB 因子已产出日」双上限收敛。模型自己的 ``factor_source``
+    再作为第三重上限：因子源只到 11-23 时，补推不会去撞 11-24 的门禁
+    （那会把「因子没物化」误报成「模型坏了」），而是通过
+    ``factor_stale`` / ``factor_lag_days`` 让人看见真实原因。
     """
     latest_day = latest or latest_trading_date(today)
-    cutoff_day = cutoff or quantdb_latest_factor_date(model.market) or latest_day
-    gap_end = min(latest_day, cutoff_day)
+    market_cutoff_day = cutoff or quantdb_latest_factor_date(model.market) or latest_day
+    market_latest_day = min(latest_day, market_cutoff_day)
+    factor_source, factor_dates = _quantdb_available_dates(model)
+    factor_latest_day: date | None = None
+    if factor_dates:
+        try:
+            factor_latest_day = date.fromisoformat(str(factor_dates[-1])[:10])
+        except ValueError:
+            factor_latest_day = None
+    gap_end = (
+        min(market_latest_day, factor_latest_day)
+        if factor_latest_day is not None
+        else market_latest_day
+    )
+    factor_lag_days = 0
+    if factor_latest_day is not None and market_latest_day > factor_latest_day:
+        factor_lag_days = len(
+            trading_dates_between(
+                factor_latest_day + timedelta(days=1), market_latest_day
+            )
+        )
+    factor_fields = {
+        "factor_source": factor_source,
+        "factor_latest_date": (
+            str(factor_latest_day) if factor_latest_day is not None else None
+        ),
+        "market_latest_date": str(market_latest_day),
+        "factor_lag_days": factor_lag_days,
+        "factor_stale": factor_lag_days > 0,
+    }
     if not model.storage_path or not Path(model.storage_path).is_dir():
         return BackfillCoverage(
             min_date=None,
@@ -345,13 +399,13 @@ def compute_coverage(
             latest_trade_date=str(latest_day),
             data_cutoff_date=str(gap_end),
             reason="missing_storage",
+            **factor_fields,
         )
     parquet_file = next(
         (path for path in resolve_pred_candidates(model.storage_path) if path.is_file()),
         None,
     )
     if parquet_file is None:
-        _, factor_dates = _quantdb_available_dates(model)
         if not factor_dates:
             return BackfillCoverage(
                 min_date=None,
@@ -362,6 +416,7 @@ def compute_coverage(
                 estimated=True,
                 source="none",
                 reason="pred.parquet not found and quantdb unavailable",
+                **factor_fields,
             )
         max_date = factor_dates[-1]
         start = date.fromisoformat(max_date) + timedelta(days=1)
@@ -375,6 +430,7 @@ def compute_coverage(
             estimated=True,
             source="quantdb_fallback",
             count=len(factor_dates),
+            **factor_fields,
         )
     dates = read_pred_dates(parquet_file)
     if not dates:
@@ -386,6 +442,7 @@ def compute_coverage(
             data_cutoff_date=str(gap_end),
             source="pred",
             reason="pred.parquet has no trade_date column",
+            **factor_fields,
         )
     gaps = find_inference_gap_dates(dates, gap_end)
     return BackfillCoverage(
@@ -396,6 +453,7 @@ def compute_coverage(
         data_cutoff_date=str(gap_end),
         source="pred",
         count=len(dates),
+        **factor_fields,
     )
 
 

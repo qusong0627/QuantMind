@@ -61,6 +61,7 @@ from backend.services.engine.inference.router_service import InferenceRouterServ
 from backend.services.engine.inference.model_backfill import (
     MAX_GAP_DAYS_PER_MODEL,
     compute_coverage,
+    factor_stale_message,
     resolve_backfill_model,
 )
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
@@ -2407,8 +2408,16 @@ async def get_inference_coverage(
             not coverage.gap_dates
             and coverage.reason is None
             and not coverage.estimated
+            and not coverage.factor_stale
         ),
+        "factor_source": coverage.factor_source,
+        "factor_latest_date": coverage.factor_latest_date,
+        "market_latest_date": coverage.market_latest_date,
+        "factor_lag_days": coverage.factor_lag_days,
+        "factor_stale": coverage.factor_stale,
     }
+    if coverage.factor_stale:
+        payload["factor_stale_message"] = factor_stale_message(coverage)
     if coverage.data_cutoff_date:
         payload["data_cutoff_date"] = coverage.data_cutoff_date
     if coverage.estimated:
@@ -2436,7 +2445,21 @@ async def trigger_backfill(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     gaps = list(coverage.gap_dates)
+    stale_message = factor_stale_message(coverage)
     if not gaps:
+        if coverage.factor_stale:
+            # 不是「已是最新」，也不是模型坏了：因子源本身停在更早的日期。
+            # 200 返回，前端按 blocked 展示橙色提示，而不是红色失败。
+            return {
+                "task_id": None,
+                "status": "blocked",
+                "message": stale_message,
+                "gap": 0,
+                "factor_source": coverage.factor_source,
+                "factor_latest_date": coverage.factor_latest_date,
+                "market_latest_date": coverage.market_latest_date,
+                "factor_lag_days": coverage.factor_lag_days,
+            }
         return {
             "task_id": None,
             "status": "completed",
@@ -2471,13 +2494,16 @@ async def trigger_backfill(
     job_id = str(job.get("job_id") or "")
     if str(job.get("status")) == "completed":
         return {"task_id": None, "status": "completed", "message": "已是最新", "gap": 0}
-    return {
+    response = {
         "task_id": job_id,
         "job_id": job_id,
         "status": "running",
         "gap": int(job.get("total_days") or len(gaps)),
         "target_dates": gaps,
     }
+    if stale_message:
+        response["warning"] = stale_message
+    return response
 
 
 @router.get(

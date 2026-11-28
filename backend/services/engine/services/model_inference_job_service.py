@@ -33,6 +33,7 @@ from backend.services.engine.inference.model_backfill import (
     BackfillModel,
     SerialResult,
     compute_coverage,
+    factor_stale_message,
     ineligibility_reason,
     resolve_backfill_model,
     run_serial,
@@ -95,6 +96,10 @@ class PreviewEntry:
             "status": self.model.status,
             "latest_data_date": self.coverage.max_date,
             "gap_count": self.coverage.gap_count,
+            "factor_source": self.coverage.factor_source,
+            "factor_latest_date": self.coverage.factor_latest_date,
+            "factor_lag_days": self.coverage.factor_lag_days,
+            "factor_stale": self.coverage.factor_stale,
             "estimated_seconds": int(round(self.estimated_seconds)),
             "eligible": self.eligible,
             "reason": self.reason,
@@ -296,6 +301,11 @@ async def build_preview(
         *(_entry_for(model, seconds) for model, seconds in tasks)
     )
     result.entries = list(entries)
+    for entry in result.entries:
+        if entry.coverage.factor_stale:
+            message = factor_stale_message(entry.coverage)
+            if message and message not in result.warnings:
+                result.warnings.append(message)
 
     # 同一任务只能补推一个市场 + 单模型缺口不能超上限。
     # 2026-10-23 用户口径「选中了就要能一键全部」：把违规的**个别模型**标为不可补推
