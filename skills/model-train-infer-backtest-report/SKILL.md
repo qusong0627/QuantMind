@@ -51,6 +51,50 @@ description: "模型训练-推理-组合回测-专业报告 全流程 — 提交
    └─ 回测数据 → 研报级 MD → md_to_pdf_report.py → PDF
 ```
 
+## 2026-11-28 更新：网页训练全链路 + 快速补推（必读）
+
+### A. 训练：优先走网页/API，不要直跑 train.py
+
+- **网页/API 路径**（`POST /api/v1/models/run-training`）会创建 `qm_training_runs` 记录、保存完整 result/logs、训练完成后自动注册模型并拆分多算法条目；前端训练历史/结果页的图表依赖这条记录。
+- **直跑 `docker exec ... train.py --config`** 只会产出工作区文件与 `result.json`，**没有 `qm_training_runs` 记录**，网页训练历史看不到，图表也会缺；仅用于临时实验。临时实验要图表口径一致，至少把 `cache.dir` 设为 `/data/training_cache` 并走注册脚本。
+- **多模型串联（13 个一起）**：请求里用 `model.types: [lightgbm, xgboost, catboost, linear, random_forest, mlp, gru, lstm, alstm, transformer, tcn, tabnet, nativetft]`，`ensemble: none`；后端 `train_multi_models` 顺序训练、生成 `comparison`，按 `val_rank_icir` 选 primary，再 `split_multi_model_entries` 拆成 13 条单算法记录。
+- **选优口径警告（30 特征 13 模型实测）**：primary=NativeTFT（val ICIR 0.7882），但 test RankIC 最高的是 CatBoost 0.0910 / Linear 0.0899 / XGBoost 0.0898，NativeTFT test RankIC 仅 0.0797。**不要把 primary 自动当默认模型**；晋级看 test 指标 + eval 中心闸门。
+
+### B. 2026-11-27 机构级默认值（训练页新建草稿生效）
+
+| 模型 | 默认 |
+|---|---|
+| LightGBM | lr 0.03 / leaves 31 / depth 6 / min_data 500 / bagging_freq 1 / L2 5.0 / rounds 1000 |
+| XGBoost | depth 5 / subsample 0.8 / colsample 0.8 / reg_lambda 10 / min_child_weight 500 |
+| CatBoost | depth 5 / l2 10 / random_strength 2.0 / bagging_temperature 1.0 / iterations 2000（独立下发） |
+| GRU/LSTM/ALSTM | `dl_lr` 3e-4（旧 1e-3 在大表首轮过冲） |
+| MLP | hidden 128 / lr 1e-3 / epochs 500（前端专属默认块） |
+
+训练护栏（2026-11-27 起）：
+- 特征名含 `label*` / `fwd_ret*` / `future_ret*` → 提交 422、训练入口 RuntimeError；`return_{n}d` 只告警。
+- 切分时点完整性：train→valid / valid→test 交易日间隔必须 ≥ `horizon + 1`；短段无法裁 embargo 直接失败（旧实现只告警跳过）；WFA 窗口与 OOF 折也补了 `horizon + lag` embargo。
+- LGB 对 `ind_code_l1/l2` 声明 categorical；LGB 早停 `first_metric_only=True`；TCN 感受野 < `step_len` 会告警并写 `dl_metadata.structure_guard`。
+- **DL 预测帧已带评估列**（`label_return/OHLC/中性化控制列/label_return_h*`，2026-11-28 修）：批量训练主模型是 DL 时，`eval_report` 不再退化成 `label_rank`、`residual_ic` 不再为 None，前端图表与单模型网页训练一致。**旧模型/旧 DL 子模型的 pred 仍是 5 列，需要重训才有完整图表**。
+
+### C. 训练数据读取：先看缓存，再谈 DuckDB
+
+- 冷读实测：`l1_factors` 2021-12~2026-11，5,831,582 行 × 36 列 = **135.3s**；同特征/同窗口命中训练缓存 = **约 15s**。
+- 平台 Docker 编排器已把宿主机 `data/training_cache` 挂到容器 `/training_cache`（跨任务复用）；**直跑 config 必须把 `cache.dir` 写成 `/data/training_cache`**，否则 `/tmp` 随 `--rm` 容器消失，每次都冷读。
+- DuckDB 已是读取引擎；count 扫描 5.83M 行 4 线程 5.78s、16 线程 4.84s——**扫描不是瓶颈**，135s 主要花在 4,075 个日分区的列解码 + `daily_backward` OHLCV join + pandas 建帧。优化优先级：持久缓存 > 日分区合并（4,075 → 月/年文件）> 读连接线程 8~12 > 重新评估 OHLCV join 是否必要（涉及复权口径，需先验价）。
+
+### D. 多模型并联（内存够时）
+
+- 现在 `train_multi_models` 是**串行**。非 DL 6 个模型互相独立，可开 2~3 个并发（每模型 `TRAIN_NTHREADS≈cpu/workers`），28 分钟可压到 10~15 分钟；DL 7 个在单张 16GB GPU 上不建议盲目并发（DataLoader `num_workers=0` 是 CPU 瓶颈，2 个并发也难线性提速）。
+- 13 模型实测：数据 ~3min（冷读）、非 DL ~28min（RF 965s / MLP 503s / LGB 131s）、DL ~152min（30 epoch 快筛），总 ~3h。持久缓存 + 非 DL 并行后可到 ~2h35m；DL 段不变。
+- 更快的落地方式：拆成两个任务（非 DL 并行、DL 单独串行）共享持久缓存；不要在单进程里无脑开满线程。
+
+### E. 快速补推（推理到最新）
+
+- **模型管理「一键补全至最新」**与**模型治理「批量补推」**统一走 `/models/{id}/inference/backfill` 或 `/models/inference/backfill-jobs` → `create_job → run_serial → run_one_model`。
+- 2026-11-28 起：模型之间仍串行，但**单模型内部 4 个交易日并发 + 全部缺口日只合并一次 `pred.parquet`**（`BACKFILL_DAY_WORKERS` 默认 4）；补推期间强制 `ENABLE_TDX_PUSH=false`，不触发通达信选股/滚动买卖。
+- **单模型「批量推理」不是这条**：`/models/inference/batch` 走 `BatchInferenceOrchestrator`，前端默认并发 5、逐日独立子进程，**不写 pred.parquet**（只产出每日信号/run 记录）；用它补历史后 coverage 仍显示缺口是正常的。
+- **代码改了必须重启 API 容器**：`model_backfill` 在 API 启动时 import，网页触发的补推用 API 进程里的旧模块；重启 `quantmind`/celery 后才切到新路径。
+
 ## Target Contract（训练目标契约，2026-11-24 起）
 
 训练目标不再是散落的平铺字段，而是注册表里版本不可变的 `LabelTargetSpec`。提交训练时：
@@ -269,8 +313,9 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
 # 返回 {batch_id, status:"pending", trade_dates, window_meta}
 ```
 
-### 2.2 轮询批量推理进度
+> ⚠️ `/inference/batch` **只写每日信号 / run 记录，不写 `pred.parquet`**；补 pred 覆盖/图表请走「模型管理 → 一键补全至最新」或 `/models/inference/backfill-jobs`（2026-11-28 起：模型级串行，单模型内部 4 日并发 + 全部缺口日只合并一次 pred；`BACKFILL_DAY_WORKERS` 默认 4，补推强制 `ENABLE_TDX_PUSH=false`）。
 
+### 2.2 轮询批量推理进度
 ```bash
 curl -s -H "$AUTH" "$BASE/api/v1/models/inference/batch/<batch_id>" \
   | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status'), d.get('progress_done'), '/', d.get('progress_total'))"
@@ -419,7 +464,11 @@ curl -s -X POST -H "$AUTH" -H "$CT" "$BASE/api/v1/models/inference/batch" \
 | 严格评估 404 / 未生成 | 后置任务需要 API 进程已加载新代码；管理员 `POST .../strict-report` 重算，或容器内跑 `strict_eval_run.py --store` |
 | 排序损失提交 422 | rank_xendcg/lambdarank 与 quantile/optuna 互斥，先关掉后者 |
 | 样本权重训练直接报错 | `trade_mask.parquet` / `st_pit_cache` 缺失（fail-closed）；确认 `/data/quantdb` 对应路径存在 |
-| 推理慢/超时 | range 批量后台跑，耐心等；reuse_existing=true 断点续跑 |
+| 推理慢/超时 | 先确认走的是补推还是 `/inference/batch`：补推（写 pred）2026-11-28 起单模型内 4 日并发 + 一次合并；batch（不写 pred）默认并发 5。后台跑，`reuse_existing=true` 断点续跑 |
+| 网页点补推仍然很慢 | API 容器没重启，进程里还是旧 `model_backfill`；重启 `quantmind`/celery 后看日志 `[backfill-fast] ... workers=4` |
+| 补推期间出现通达信推送/桥超时 | 补推脚本应设 `ENABLE_TDX_PUSH=false`；批量补历史不得触发实盘选股/滚动买卖 |
+| 批量训练结果没图表 / eval 退化成 label_rank | 旧 DL 子模型 pred 只有 5 列（缺 `label_return/OHLC/控制列`）；2026-11-28 起已修，需重训才有完整列。直跑 `train.py` 还没有 `qm_training_runs` 记录，网页训练历史看不到——改走 `/models/run-training` |
+| 训练读数据慢（冷读 2 分钟+） | 训练缓存未命中；直跑 config 把 `cache.dir` 设为 `/data/training_cache`，平台 Docker 用 `/training_cache`；同特征/窗口重复跑约 15s |
 | 回测无买入 | 检查 MODEL_ID 是否对、分数是否 ≥0.015（分数太低自然空仓） |
 | 报告收益异常 | 确认 klines 覆盖区间、涨跌停/停牌处理、cron 时间 |
 | asyncio 冲突 | 混用 load_signals(asyncio) 和 psycopg2 时，加载函数统一用 psycopg2 同步 |

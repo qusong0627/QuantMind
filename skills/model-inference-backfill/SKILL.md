@@ -24,12 +24,13 @@ description: "模型推理入口导航与推理补全 — 一页找到推理链�
 | 我要… | 去这里 |
 |------|--------|
 | 前端看/点推理 | 模型管理 → 模型详情 → 「推理覆盖」面板（`InferenceCoveragePanel.tsx`） |
-| 单模型补到最新 | `POST /api/v1/models/{model_id}/inference/backfill`（会合并 pred.parquet） |
+| 单模型补到最新 | `POST /api/v1/models/{model_id}/inference/backfill`（按模型一次合并 pred；2026-11-28 起单模型内 4 日并发） |
 | 查缺口到哪天 | `GET /api/v1/models/{model_id}/inference/coverage` |
-| 多模型批量补 | `skills/model-inference-backfill/scripts/backfill_inference.py`（本技能） |
+| 多模型补推（前端） | 模型治理 → 勾选模型 →「批量补推」→ `POST /api/v1/models/inference/backfill-jobs`（同一套 `run_one_model`） |
+| 多模型批量补（CLI） | `skills/model-inference-backfill/scripts/backfill_inference.py`（本技能） |
 | 多日批量推理 | `POST /api/v1/models/inference/batch`（**不写 pred.parquet**，见 §4） |
 | 每日自动推理 | Celery beat `engine.tasks.auto_inference_if_needed`（工作日 08:00） |
-| 改推理代码 | `backend/services/engine/inference/script_runner.py` |
+| 改推理代码 | `backend/services/engine/inference/script_runner.py` / `model_backfill.py` |
 
 ## 1. 写链路全景（唯一路径）
 
@@ -86,7 +87,10 @@ merge_signals_into_pred(pred.parquet, signals_by_date)
 | GET | `/inference/latest` | 当前生效推理批次 |
 | GET | `/inference/precheck` | 推理前置检查 |
 | GET | `/{model_id}/inference/coverage` | **覆盖缺口**（min/max/gap_dates/data_cutoff_date） |
-| POST | `/{model_id}/inference/backfill` | **单模型补全**（逐日串行 + 每日合并 pred） |
+| POST | `/{model_id}/inference/backfill` | **单模型补全**（2026-11-28 起：单模型内 4 日并发 + 全缺口日一次合并 pred） |
+| POST | `/inference/backfill-jobs` | **多模型补推**（模型间串行，单模型内 4 日并发；模型治理「批量补推」入口） |
+| GET | `/inference/backfill-jobs` / `/{job_id}` | 补推任务列表/进度 |
+| POST | `/inference/backfill-jobs/{job_id}/cancel` | 取消补推（当前模型完成后停） |
 | GET | `/{model_id}/inference/backfill/{task_id}` | 补全任务状态 |
 | GET/PUT | `/inference/settings/{model_id}` | 自动推理开关 / 每日执行时间 HH:MM |
 
@@ -129,12 +133,24 @@ merge_signals_into_pred(pred.parquet, signals_by_date)
 
 | 方式 | 写 pred.parquet | 并发 | 适用 |
 |------|:---:|------|------|
-| `POST /{model_id}/inference/backfill` | ✅ 每日合并 | 单模型逐日 | 单个模型、从页面点 |
+| `POST /{model_id}/inference/backfill` / `POST /inference/backfill-jobs` | ✅ **每模型一次合并** | 模型间串行；**单模型内 4 日并发**（`BACKFILL_DAY_WORKERS` 默认 4） | 页面点「一键补全」、模型治理「批量补推」 |
 | `POST /inference/batch` | ❌ **只写 signal_scores** | 编排器 5 | 多日批量看信号，不关心 pred 曲线 |
 | CLI `backfill_inference.py` | ✅ 批量合并 | 模型间并发 N，合并串行 | **多模型 × 多周期批量补齐**（本技能） |
 
 ⚠️ 用 batch 编排器补历史后，coverage 仍显示缺口——因为它不写 pred。这是最容易
 踩的坑。
+
+### 4.1 2026-11-28 快速补推实现（当前线上逻辑）
+
+- 核心：`backend/services/engine/inference/model_backfill.py::run_one_model`
+  - 同一模型的全部缺口日先并发推理（默认 4，`BACKFILL_DAY_WORKERS` 可覆盖），信号收集完；
+  - **最后只调一次 `merge_signals_into_pred`**（该函数本身支持 `[(day, signals), ...]` 多日一次合并），把旧实现「每天读 5.8M 行 pred 再整份写回」的 273 次全量读写压到 13 次。
+  - 模型之间仍串行（`run_serial`），单用户同时只有一个补推任务。
+- 补推期间必须 `ENABLE_TDX_PUSH=false`：否则 `InferenceScriptRunner` 会推送通达信选股并执行滚动买卖；批量补历史绝不能下真单/触发滚动，桥不可达时还会每天等超时。`backfill_all13.py` 已在脚本入口强制关闭。
+- **代码改动后必须重启 API 容器**：`model_backfill` 在 API 启动时 import；网页/API 触发的补推跑在 API 进程里，不重启就仍用旧模块。独立 `docker exec` 脚本是新进程，不受影响。
+- 进度语义：单日事件 `merged_rows=0`（合并推迟到模型结束），模型收尾时 `days_merged` 才更新；前端进度会按 4 天一批往前跳。
+- 验证：日志出现 `[backfill-fast] ... workers=4`；任务行 `qm_model_inference_jobs` 的 `completed_days/total_days`；完成后每个子模型 `pred.parquet` 的 `max(trade_date)` 到最新交易日。
+
 
 ## 5. CLI 驱动用法
 
@@ -221,15 +237,15 @@ tail -20 /tmp/backfill_inference.log
    docker exec quantmind ps aux | grep 'inference.py --date' | grep -v grep
    ```
    有正在跑的模型就 `--exclude-model-id` 跳过，等它跑完再补剩余缺口。
-3. **pred.parquet 全量读改写占内存**（千万行级，峰值数 GB）。合并必须串行
-   （CLI 用全局 `_merge_lock`），模型并发 ≤ 3~4。机器可用内存 < 8GB 时降到 2。
-4. **深模慢**：树/线性约 11-12s/日；GRU/LSTM/ALSTM/TCN/Transformer/TabNet/
-   NativeTFT 约 34s+/日。963 个 model×day ≈ 1.5–3 小时。
-5. **状态文件写失败不能杀线程**：多线程共用 `.tmp` 会 `os.replace` 失败，CLI 已
+3. **pred.parquet 全量读改写占内存**（千万行级，峰值数 GB）。`run_one_model` 现在同一模型只合并一次；旧的逐日路径仍是每天读改写。同一模型的合并必须串行（`inference_lock`/文件锁），不同模型可并发。
+4. **深模慢**：树/线性约 11-12s/日；GRU/LSTM/ALSTM/TCN/Transformer/TabNet/NativeTFT 约 34s+/日。API 的 `run_one_model` 默认 4 日并发（`BACKFILL_DAY_WORKERS=4`），13 模型 × ~20 日约 20-40 分钟量级；设 1 可退回逐日。
+5. **补推禁止实盘副作用**：`ENABLE_TDX_PUSH` 必须在补推进程里设为 false，否则每日推理后会尝试通达信选股推送 + 滚动买卖；批量补历史绝不允许下真单，桥不可达时还会每天等超时。
+6. **代码改动后重启 API 容器**：`model_backfill` 在 API 启动时 import；网页/API 触发的补推跑在 API 进程里，不重启仍用旧模块。独立 `docker exec` 脚本是新进程，不受影响。重启后日志应出现 `[backfill-fast] ... workers=4`。
+7. **状态文件写失败不能杀线程**：多线程共用 `.tmp` 会 `os.replace` 失败，CLI 已
    改成 pid+thread 唯一临时名并吞异常。
-6. **服务端推理锁**：同模型同日并发会被 `inference_lock` 拦（`LOCK_HELD`），批量
+8. **服务端推理锁**：同模型同日并发会被 `inference_lock` 拦（`LOCK_HELD`），批量
    时不要对同一模型开两个驱动。
-7. `pred.parquet` 新补的行 `label=NaN, split="test"` —— 收益标签要等时间兑现，
+9. `pred.parquet` 新补的行 `label=NaN, split="test"` —— 收益标签要等时间兑现，
    分析时别把 NaN 标签当 0。
 
 ## 7. 验证补全结果
@@ -259,6 +275,10 @@ GROUP BY feature_version ORDER BY 1;"
 | 症状 | 原因 / 处理 |
 |------|------|
 | coverage 一直有缺口，但 signal_scores 有行 | 走了 batch 编排器（不写 pred）；改用 backfill / CLI |
+| 网页/API 点补推仍然很慢，或进度一天一天走 | API 容器没重启，进程里还是旧 `model_backfill`；重启 `quantmind`/celery，日志确认 `[backfill-fast] ... workers=4` |
+| 补推期间出现通达信推送/滚动买卖/桥超时 | 补推进程必须 `ENABLE_TDX_PUSH=false`；批量补历史不得触发实盘 |
+| 进度一次跳 4 天、单日事件 `merged_rows=0` | 正常：4 日并发 + 合并推迟到模型结束；`days_merged` 在模型收尾更新 |
+| `BACKFILL_DAY_WORKERS` 设了不生效 | 确认环境变量在 **job 进程**（API 容器/启动脚本）里；默认已是 4，设 1 可退回逐日 |
 | 补完分数分布明显偏（全市场同一档） | 兜底模型污染；确认 `enable_fallback=False`，删掉该日 pred 行重跑 |
 | `LOCK_HELD` | 同模型已有推理在跑；等锁释放或换模型 |
 | 子进程超时 | `INFERENCE_SCRIPT_TIMEOUT_SEC` 默认 3600s；深模长窗口可调大 |
