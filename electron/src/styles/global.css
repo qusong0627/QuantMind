@@ -960,6 +960,25 @@ html.platform-win32.os-win10 .module-grid-container {
   background: #94a3b8;
 }
 
+/* 模型对比表：白底单元格上常显粗一点的横向滚动条（用户要能左右拖着看全部模型列）。
+   注意不要设 scrollbar-width：Chromium 里它会切到原生 overlay 滚动条，
+   ::-webkit-scrollbar 的尺寸样式随之失效，滚动条变成悬停才出现。 */
+.model-compare-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 12px;
+}
+.model-compare-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.model-compare-scroll::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 9999px;
+  border: 3px solid #f1f5f9;
+}
+.model-compare-scroll::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
 /* ǿ��С�ֺ��ı�ʹ�ô�Ҫ����ջ������������ */
 .text-xs, 
 .text-\[11px\], 

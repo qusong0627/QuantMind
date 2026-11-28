@@ -7,6 +7,7 @@ import {
   ChevronUp, Shield, Zap, ListFilter, Activity,
   Compass, Sparkles, Pencil, ArrowUpDown, RotateCcw,
   Folder, FolderPlus, FolderInput, FolderMinus, Check,
+  GitCompare,
 } from 'lucide-react';
 import {
   Button, Card, Tag, Typography, Empty, Spin, message,
@@ -72,6 +73,7 @@ import {
   validateFolderName,
 } from './modelRegistryFolders';
 import { ModelFolderModal, ModelFoldersPanel } from './modelFoldersPanel';
+import { ModelCompareModal } from './ModelCompareModal';
 import { PublishModelModal } from './hub/PublishModelModal';
 import { DriftTabPanel } from './DriftTabPanel';
 import { MarketRegimePanel } from './MarketRegimePanel';
@@ -163,6 +165,8 @@ export const ModelRegistryPage: React.FC = () => {
   const [folderNameValue, setFolderNameValue] = useState('');
   // 整理模式：多选卡片批量移动到文件夹（与融合模式互斥）
   const [organizeMode, setOrganizeMode] = useState(false);
+  // 整理模式多选后横向对比（最近3个月 + 测试集 IC）
+  const [showCompareModal, setShowCompareModal] = useState(false);
   const [organizeSelected, setOrganizeSelected] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [settingDefault, setSettingDefault] = useState(false);
@@ -1362,6 +1366,20 @@ export const ModelRegistryPage: React.FC = () => {
                         移动到文件夹
                       </Button>
                     </Dropdown>
+                    <Button
+                      size="small"
+                      icon={<GitCompare size={13} />}
+                      disabled={organizeSelected.length < 2}
+                      onClick={() => setShowCompareModal(true)}
+                      title={
+                        organizeSelected.length < 2
+                          ? '至少选中 2 个模型才能对比'
+                          : `对比选中的 ${organizeSelected.length} 个模型（最近3个月 + 测试集 IC）`
+                      }
+                      className="flex-1 rounded-xl h-9 border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-black text-xs shadow-sm flex items-center justify-center gap-1.5"
+                    >
+                      对比
+                    </Button>
                   </div>
                 </div>
               ) : (
@@ -1803,6 +1821,17 @@ export const ModelRegistryPage: React.FC = () => {
           />
         </div>
       </Modal>
+
+      {/* ═══ 模型对比 Modal（最近3个月 + 测试集 IC） ═══ */}
+      <ModelCompareModal
+        open={showCompareModal}
+        models={allModels.filter((model) => organizeSelected.includes(model.model_id))}
+        favorites={listPrefs.favorites}
+        pinned={listPrefs.pinned}
+        onToggleFavorite={handleToggleFavorite}
+        onTogglePin={handleTogglePin}
+        onClose={() => setShowCompareModal(false)}
+      />
 
       {/* ═══ 新建 / 重命名文件夹 Modal ═══ */}
       <ModelFolderModal
