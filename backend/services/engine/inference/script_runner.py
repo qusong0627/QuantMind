@@ -1259,8 +1259,12 @@ class InferenceScriptRunner:
                 )
                 return ExecutionResult(
                     success=False,
+                    exit_code=-1,
+                    stdout="",
+                    stderr="LOCK_HELD",
                     run_id="",
                     signals_count=0,
+                    error="LOCK_HELD: 同日同模型全市场推理已在执行",
                     fallback_used=False,
                     fallback_reason="LOCK_HELD: 同日同模型全市场推理已在执行",
                 )

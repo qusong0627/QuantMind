@@ -609,6 +609,16 @@ async def run_one_model(
     consecutive_failures = 0
     cancelled = False
     workers = max(1, int(os.getenv("BACKFILL_DAY_WORKERS", "4") or "4"))
+    # DL/序列模型单进程显存/内存与线程开销大：4 并发在 16GB GPU + 单容器上
+    # 实测会出现推理失败（LSTM 首日 4 并发 3 天失败、单跑成功）。DL 默认压到 2。
+    _dl_types = frozenset(
+        {"gru", "lstm", "alstm", "transformer", "tcn", "tabnet", "nativetft"}
+    )
+    if str(model.model_type or "").lower() in _dl_types:
+        workers = min(
+            workers,
+            max(1, int(os.getenv("BACKFILL_DL_DAY_WORKERS", "2") or "2")),
+        )
     print(
         f"[backfill-fast] {model.model_id} days={len(days)} workers={workers}",
         flush=True,
