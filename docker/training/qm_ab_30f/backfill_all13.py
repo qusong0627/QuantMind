@@ -105,7 +105,7 @@ async def main() -> None:
             f"{current.get('total_days')} failed={current.get('failed_days')}",
             flush=True,
         )
-        if status in ("completed", "failed", "cancelled"):
+        if status in ("completed", "failed", "cancelled", "partial"):
             print("[final]", json.dumps(current, ensure_ascii=False, default=str)[:12000])
             return
 
