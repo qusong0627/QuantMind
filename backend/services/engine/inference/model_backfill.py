@@ -608,9 +608,10 @@ async def run_one_model(
     pending: list[tuple[str, list[dict]]] = []
     consecutive_failures = 0
     cancelled = False
-    workers = max(1, int(os.getenv("BACKFILL_DAY_WORKERS", "1") or "1"))
-    logger.info(
-        "backfill %s: days=%d day_workers=%d", model.model_id, len(days), workers
+    workers = max(1, int(os.getenv("BACKFILL_DAY_WORKERS", "4") or "4"))
+    print(
+        f"[backfill-fast] {model.model_id} days={len(days)} workers={workers}",
+        flush=True,
     )
 
     for start in range(0, len(days), workers):
