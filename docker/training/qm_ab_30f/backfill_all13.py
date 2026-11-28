@@ -17,6 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+
+# 补推只做「算分 + 合并 pred」，不触发实盘侧效应：
+# ENABLE_TDX_PUSH=true 时 InferenceScriptRunner 会推送通达信选股并执行滚动买卖；
+# 批量补历史日绝不能下真单/触发滚动，且桥不可达时每天都会等超时。
+os.environ["ENABLE_TDX_PUSH"] = "false"
 
 from sqlalchemy import text
 

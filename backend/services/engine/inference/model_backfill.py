@@ -435,13 +435,14 @@ def create_redis_client():
         return None
 
 
-def _execute_sync(
+def _infer_sync(
     model: BackfillModel,
     day: str,
     tenant_id: str,
     user_id: str,
     redis_client: Any,
-) -> tuple[Any, int]:
+) -> tuple[Any, list]:
+    """只推理、不合并：批量补推按模型收集所有日信号后一次合并。"""
     runner = InferenceScriptRunner(
         primary_model_dir=str(Path(model.storage_path)),
         primary_model_id=model.model_id,
@@ -449,15 +450,27 @@ def _execute_sync(
     result = runner.execute(
         date=day, tenant_id=tenant_id, user_id=user_id, redis_client=redis_client
     )
-    merged_rows = 0
+    signals: list = []
     if getattr(result, "success", False):
         signals = list(getattr(result, "signals", None) or [])
-        if signals:
-            merged_rows = merge_signals_into_pred(
-                resolve_pred_parquet(model.storage_path),
-                [(day, signals)],
-                create_if_missing=True,
-            )
+    return result, signals
+
+
+def _execute_sync(
+    model: BackfillModel,
+    day: str,
+    tenant_id: str,
+    user_id: str,
+    redis_client: Any,
+) -> tuple[Any, int]:
+    result, signals = _infer_sync(model, day, tenant_id, user_id, redis_client)
+    merged_rows = 0
+    if getattr(result, "success", False) and signals:
+        merged_rows = merge_signals_into_pred(
+            resolve_pred_parquet(model.storage_path),
+            [(day, signals)],
+            create_if_missing=True,
+        )
     return result, merged_rows
 
 
@@ -562,6 +575,143 @@ async def run_one_day(
     )
 
 
+async def run_one_model(
+    model: BackfillModel,
+    gap_dates: Sequence[str],
+    tenant_id: str,
+    user_id: str,
+    *,
+    progress_cb: EventCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    redis_client: Any = None,
+    task_id: str | None = None,
+    failure_limit: int = CONSECUTIVE_FAILURE_LIMIT,
+) -> ModelRunResult:
+    """单模型批量补推：模型只加载一次、所有缺口日只合并一次 pred.parquet。
+
+    逐日 ``run_one_day`` 每天都要把 5.8M 行的 pred.parquet 读进来再整份写回；
+    13 模型 × 21 日 = 273 次全量读写，是补推慢的主因。本函数把同一模型的
+    所有缺口日信号先收集起来，最后调一次 ``merge_signals_into_pred``（其本身
+    支持 ``[(day, signals), ...]`` 多日一次合并），把 273 次压到 13 次。
+    """
+    days = sorted(str(day) for day in gap_dates)
+    summary = ModelRunResult(
+        model_id=model.model_id,
+        display_name=model.display_name,
+        days_total=len(days),
+        gap_dates=days,
+    )
+    summary.status = "running"
+    pending: list[tuple[str, list[dict]]] = []
+    consecutive_failures = 0
+    cancelled = False
+
+    for index, day in enumerate(days):
+        if should_cancel is not None and await should_cancel():
+            cancelled = True
+            break
+        started = time.monotonic()
+        try:
+            result, signals = await asyncio.to_thread(
+                _infer_sync, model, day, tenant_id, user_id, redis_client
+            )
+        except Exception as exc:  # noqa: BLE001 - 单日异常不打断整模型
+            logger.warning("backfill %s %s runner 异常: %s", model.model_id, day, exc)
+            result, signals = None, []
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        fallback_reason = str(getattr(result, "fallback_reason", "") or "")
+        if result is not None and "LOCK_HELD" in fallback_reason:
+            summary.days_skipped += 1
+            consecutive_failures = 0
+            day_result = DayResult(
+                model_id=model.model_id,
+                day=day,
+                status="skipped_lock",
+                error=fallback_reason,
+                duration_ms=duration_ms,
+            )
+        elif result is None or not getattr(result, "success", False):
+            if result is not None:
+                await _record_failed_run(model, day, tenant_id, user_id, result, task_id)
+            summary.days_failed += 1
+            consecutive_failures += 1
+            error = str(getattr(result, "error", "") or "推理失败")
+            if len(summary.errors) < 20:
+                summary.errors.append({"date": day, "error": error})
+            day_result = DayResult(
+                model_id=model.model_id,
+                day=day,
+                status="failed",
+                signals_count=int(getattr(result, "signals_count", 0) or 0),
+                run_id=str(getattr(result, "run_id", "") or "") if result is not None else "",
+                error=error,
+                failure_stage=(
+                    str(getattr(result, "failure_stage", "") or "")
+                    if result is not None
+                    else ""
+                ),
+                duration_ms=duration_ms,
+            )
+        else:
+            summary.days_completed += 1
+            consecutive_failures = 0
+            pending.append((day, signals))
+            day_result = DayResult(
+                model_id=model.model_id,
+                day=day,
+                status="completed",
+                signals_count=len(signals),
+                run_id=str(getattr(result, "run_id", "") or ""),
+                duration_ms=duration_ms,
+            )
+
+        await _emit(
+            progress_cb,
+            {
+                "type": "day",
+                "model_id": model.model_id,
+                "day": day,
+                "index": index,
+                "days_total": len(days),
+                "result": {
+                    "status": day_result.status,
+                    "signals_count": day_result.signals_count,
+                    # 合并推迟到模型结束：单日事件先报 0，days_merged 在收尾更新
+                    "merged_rows": 0,
+                    "error": day_result.error,
+                    "duration_ms": day_result.duration_ms,
+                },
+                "model": summary.as_dict(),
+            },
+        )
+        if consecutive_failures >= failure_limit:
+            break
+
+    if pending:
+        try:
+            merged_rows = await asyncio.to_thread(
+                merge_signals_into_pred,
+                resolve_pred_parquet(model.storage_path),
+                pending,
+                create_if_missing=True,
+            )
+            summary.days_merged = len(pending)
+            logger.info(
+                "backfill %s batch merge: %d days / %d rows",
+                model.model_id,
+                len(pending),
+                merged_rows,
+            )
+        except Exception as exc:  # noqa: BLE001 - 合并失败不掩盖逐日推理结果
+            logger.warning("backfill %s batch merge 失败: %s", model.model_id, exc)
+            if len(summary.errors) < 20:
+                summary.errors.append({"date": "*", "error": f"batch merge: {exc}"})
+
+    summary.status = _model_status(summary, cancelled)
+    return summary
+
+
 # ── 串行编排 ──────────────────────────────────────────────────────────────
 
 DayRunner = Callable[..., Awaitable[DayResult]]
@@ -604,10 +754,14 @@ async def run_serial(
     task_id: str | None = None,
     failure_limit: int = CONSECUTIVE_FAILURE_LIMIT,
 ) -> SerialResult:
-    """多模型串行：全局同一时刻只跑一天。
+    """多模型串行：全局同一时刻只跑一个模型（模型内逐日推理）。
 
     ``models`` 为 ``(model, gap_dates)``；排序口径 = 缺口天数升序、model_id
     升序（少缺口的模型先出结果），模型内日期升序。
+
+    默认走 ``run_one_model``：同一模型的全部缺口日推理完后只合并一次
+    ``pred.parquet``（把 13 模型 × 21 日的 273 次全量读写压到 13 次）。
+    传入 ``run_day`` 时保留旧的逐日合并路径（测试/自定义）。
     """
     day_runner: DayRunner = run_day or run_one_day
     ordered = sorted(models, key=lambda item: (len(item[1]), item[0].model_id))
@@ -647,6 +801,32 @@ async def run_serial(
             progress_cb,
             {"type": "model_started", "model": summary.as_dict()},
         )
+        # 默认走「模型级批量合并」：同一模型只加载/合并一次；
+        # 传 run_day 时保留逐日路径（测试/自定义 runner 兼容）。
+        if run_day is None:
+            summary = await run_one_model(
+                model,
+                days,
+                tenant_id,
+                user_id,
+                progress_cb=progress_cb,
+                should_cancel=should_cancel,
+                redis_client=redis_client,
+                task_id=task_id,
+                failure_limit=failure_limit,
+            )
+            summaries[-1] = summary
+            completed += summary.days_completed
+            failed += summary.days_failed
+            skipped += summary.days_skipped
+            await _emit(
+                progress_cb,
+                {"type": "model_finished", "model": summary.as_dict()},
+            )
+            if summary.status == "cancelled":
+                cancelled = True
+                break
+            continue
         consecutive_failures = 0
         for index, day in enumerate(days):
             if should_cancel is not None and await should_cancel():
@@ -733,6 +913,7 @@ __all__ = [
     "resolve_backfill_model",
     "resolve_pred_parquet",
     "run_one_day",
+    "run_one_model",
     "run_serial",
     "to_backfill_model",
 ]
