@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from data.pred_frame import merge_full_pred
 from data.splits import _frame_with_range_index
 from model_trainers.metrics import _compute_metrics
 from model_trainers.trainers_dl import (
@@ -133,23 +134,13 @@ class DLAdapter:
 
     @staticmethod
     def _merge_full_pred(df, y_full_pred, val_df, test_df):
-        full_pred_df = df[["symbol", "trade_date", "label"]].copy()
-        full_pred_df = full_pred_df.merge(
-            y_full_pred[["symbol", "trade_date", "pred"]],
-            on=["symbol", "trade_date"], how="left",
-        )
-        full_pred_df["split"] = "train"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= val_df["trade_date"].min())
-            & (full_pred_df["trade_date"] <= val_df["trade_date"].max()),
-            "split",
-        ] = "valid"
-        full_pred_df.loc[
-            (full_pred_df["trade_date"] >= test_df["trade_date"].min())
-            & (full_pred_df["trade_date"] <= test_df["trade_date"].max()),
-            "split",
-        ] = "test"
-        return full_pred_df
+        """全量预测帧：与树模型同口径，携带 label_return/OHLC/中性化控制列。
+
+        实现单源在 `data/pred_frame.py`（纯 pandas，可单测）。此前 DL 只用
+        symbol/trade_date/label 造帧，主模型是 DL 时多模型结果的 eval_report
+        退化为 label_rank、residual_ic=None，前端缺图（2026-11-28 实测）。
+        """
+        return merge_full_pred(df, y_full_pred, val_df, test_df)
 
     @staticmethod
     def _test_metrics(test_df, full_pred_df):

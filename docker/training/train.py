@@ -170,35 +170,10 @@ from data.loading import load_data
 
 
 # 评估/闸门需要的附加列（不参与主训练目标，只随 pred_df 落盘）。
-_EVAL_EXTRA_CANDIDATES = (
-    "label_return",
-    # 可交易性过滤（次日开盘/收盘涨跌停）用的原始价，只进评估、不进特征
-    "open",
-    "close",
-    "label_vol",
-    "total_cap",
-    "fun_total_mv",
-    "fun_float_mv",
-    "amt_log",
-    "amt_z_20",
-    "vol_20",
-    "vol_std_20",
-    "vol_amp_20",
-    "mom_20",
-    "mom_ret_20d",
-    "mom_ret_60d",
-    "turnover",
-    "turnover_20",
-    "turn_20",
-    "turn_z_20",
-)
-
-
-def _eval_extra_cols(df: pd.DataFrame) -> list[str]:
-    """pred_df 要携带的评估列：真实收益/波动/多周期收益/中性化控制变量。"""
-    cols = [c for c in _EVAL_EXTRA_CANDIDATES if c in df.columns]
-    cols.extend(c for c in df.columns if str(c).startswith("label_return_h"))
-    return list(dict.fromkeys(cols))
+# 单源在 data/eval_columns.py：树模型与 DL 适配器共用，避免 DL 主模型缺
+# label_return/OHLC/控制列导致 eval_report 退化为 label_rank。
+from data.eval_columns import EVAL_EXTRA_CANDIDATES as _EVAL_EXTRA_CANDIDATES  # noqa: E402
+from data.eval_columns import eval_extra_cols as _eval_extra_cols  # noqa: E402
 
 
 def _attach_vol_model(
