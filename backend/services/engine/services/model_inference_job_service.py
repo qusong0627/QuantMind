@@ -100,6 +100,8 @@ class PreviewEntry:
             "factor_latest_date": self.coverage.factor_latest_date,
             "factor_lag_days": self.coverage.factor_lag_days,
             "factor_stale": self.coverage.factor_stale,
+            "factor_incomplete": self.coverage.factor_incomplete,
+            "factor_missing_count": len(self.coverage.factor_missing_features),
             "estimated_seconds": int(round(self.estimated_seconds)),
             "eligible": self.eligible,
             "reason": self.reason,
@@ -302,7 +304,11 @@ async def build_preview(
     )
     result.entries = list(entries)
     for entry in result.entries:
-        if entry.coverage.factor_stale:
+        if entry.coverage.factor_incomplete:
+            entry.eligible = False
+            entry.reason = "factor_incomplete"
+            entry.estimated_seconds = 0.0
+        if entry.coverage.factor_blocked:
             message = factor_stale_message(entry.coverage)
             if message and message not in result.warnings:
                 result.warnings.append(message)

@@ -250,6 +250,41 @@ def scan_libraries(
     return {lib: [it["name"] for it in items] for lib, items in external.items()}
 
 
+def library_freshness(
+    qroot: Path | None = None,
+    market: str = "CN",
+    discovered: dict[str, list[str]] | None = None,
+) -> list[dict]:
+    """扫描到的每个库的最新分区日（「因子研究」最新时间列）。
+
+    ``discovered`` 由调用方传入刚扫出的 ``{库: [因子名]}`` 时不再重复读 schema；
+    只补一次分区目录名（``dt=YYYYMMDD``）——这是**数据新鲜度**，不是快照构建时间。
+    排序沿用 ``AUTO_PRIORITY``，未登记库按字母序；前端据此做列顺序。
+    """
+    mk = _market_key(market)
+    if qroot is None:
+        from backend.shared.feature_source import resolve_market_root
+
+        qroot = resolve_market_root(mk)
+    libs = discovered if discovered is not None else scan_libraries(qroot, mk)
+    root = qroot / "6_ml_datasets"
+    rows: list[dict] = []
+    for lib, names in libs.items():
+        parts = sorted((root / lib).glob("dt=*/data.parquet"))
+        latest = parts[-1].parent.name.split("=", 1)[1] if parts else None
+        rows.append(
+            {
+                "library": lib,
+                "label": lib_label(lib),
+                "latest_dt": latest,
+                "factor_count": len(names),
+            }
+        )
+    order = {name: idx for idx, name in enumerate(AUTO_PRIORITY)}
+    rows.sort(key=lambda row: (order.get(row["library"], len(order)), row["library"]))
+    return rows
+
+
 def diff_catalog(
     discovered: dict[str, list[str]],
     catalog: set[str],

@@ -160,11 +160,22 @@ def build_partition(
         tmp = out.with_suffix(".parquet.tmp")
         base.to_parquet(tmp, index=False)
         tmp.replace(out)
+        # 质量侧车：下游 coverage/推理预检据此知道「这一天有分区但缺列」，
+        # 不用再读 189 列数据。缺列为空时删除侧车，避免旧标记粘住。
+        sidecar = out.parent / "_missing_features.json"
+        missing = sorted(set(missing_features))
+        if missing:
+            sidecar.write_text(
+                json.dumps({"day": day, "missing_features": missing}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        elif sidecar.is_file():
+            sidecar.unlink()
         return {
             "day": day,
             "status": "written",
             "rows": len(base),
-            "missing_features": sorted(set(missing_features)),
+            "missing_features": missing,
         }
     finally:
         con.close()
@@ -177,12 +188,16 @@ def extend_dataset(
     end: str | None = None,
     universe_source: str | None = None,
     force: bool = False,
+    refresh_incomplete: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """补齐 ``dataset_root`` 在 [start, end] 内的缺口分区。
 
     默认 start = 已有最新分区 + 1，end = 股票池来源库最新分区。
     只处理股票池来源库已有分区的交易日，绝不凭单一来源造残缺历史。
+    ``refresh_incomplete``：已有分区若带 ``_missing_features.json`` 侧车，也重建
+    一次——上游源库常在 T+1 才补齐（factor_dictionary / rd_mined），不刷新的话
+    缺列会永久粘在分区上。
     """
     features, sources = _load_meta(dataset_root)
     universe = universe_source or resolve_universe_source(sources, features)
@@ -208,6 +223,15 @@ def extend_dataset(
         targets = [
             day for day in universe_days if first <= day <= last
         ]
+    elif refresh_incomplete:
+        incomplete = [
+            day
+            for day in universe_days
+            if day in existing_days
+            and day <= last
+            and (dataset_root / f"dt={day}" / "_missing_features.json").is_file()
+        ]
+        targets = sorted(set(targets) | set(incomplete))
     if dry_run:
         return {
             "dataset": str(dataset_root),
@@ -225,7 +249,7 @@ def extend_dataset(
             features,
             sources,
             universe,
-            force=force,
+            force=force or day in existing_days,
         )
         for day in targets
     ]

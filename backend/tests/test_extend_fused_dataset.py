@@ -151,6 +151,37 @@ def test_extend_dataset_only_fills_days_after_existing_and_updates_meta(
     assert meta["last_extended_dt"] == "20261125"
 
 
+def test_extend_dataset_refreshes_incomplete_existing_day(tmp_path: Path) -> None:
+    # Arrange：11-24 已有分区，但侧车记着「c 列缺失」；来源库现在已补齐
+    lib_a = tmp_path / "lib_a"
+    lib_b = tmp_path / "lib_b"
+    _write(
+        lib_a,
+        "20261124",
+        pd.DataFrame({"symbol": ["SH1"], "a": [1.0]}),
+    )
+    _write(lib_b, "20261124", pd.DataFrame({"symbol": ["SH1"], "c": [5.0]}))
+    root = _dataset(tmp_path, ["a", "c"], {"a": str(lib_a), "c": str(lib_b)})
+    _write(
+        root,
+        "20261124",
+        pd.DataFrame({"symbol": ["SH1"], "a": [1.0], "c": [float("nan")], "dt": [20261124]}),
+    )
+    (root / "dt=20261124" / "_missing_features.json").write_text(
+        json.dumps({"day": "20261124", "missing_features": ["c"]}),
+        encoding="utf-8",
+    )
+
+    # Act
+    result = extend_dataset(root)
+
+    # Assert：重写该日、c 从来源库补上、侧车删除
+    assert result["written"] == 1
+    frame = pd.read_parquet(root / "dt=20261124" / "data.parquet")
+    assert frame.loc[0, "c"] == 5.0
+    assert not (root / "dt=20261124" / "_missing_features.json").exists()
+
+
 def test_extend_dataset_dry_run_does_not_write(tmp_path: Path) -> None:
     # Arrange
     lib_a = tmp_path / "lib_a"

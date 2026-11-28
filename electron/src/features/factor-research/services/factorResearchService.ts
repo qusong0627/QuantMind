@@ -7,6 +7,7 @@
  */
 
 import { SERVICE_ENDPOINTS } from '../../../config/services';
+import { apiClient } from '../../../services/aiStrategyClients';
 import type {
   CatalogResponse,
   CompareItemReq,
@@ -169,6 +170,15 @@ export interface ScanDiffItem {
 }
 
 /** 「盘上扫到什么」× 「快照目录记了什么」的差异（后端 /scan，只读） */
+export interface ScanLibraryInfo {
+  library: string;
+  label: string;
+  /** 该库最新分区日期 YYYYMMDD；读不到为 null */
+  latest_dt: string | null;
+  factor_count: number;
+  new_count: number;
+}
+
 export interface ScanDiff {
   /** 盘上有、快照目录没有（重算会收进来） */
   new: ScanDiffItem[];
@@ -176,6 +186,8 @@ export interface ScanDiff {
   missing: ScanDiffItem[];
   /** 新增数按来源库（分组标题用；顺序与 new 一致） */
   new_by_library: Record<string, number>;
+  /** 本次扫描到的库：最新数据日 / 因子数 / 新增数（「最新时间」列） */
+  libraries?: ScanLibraryInfo[];
   unchanged_count: number;
   /** 盘上扫到的因子数（已跨库去重） */
   discovered_count: number;
@@ -211,6 +223,43 @@ export interface PipelineState {
 /** 扫描 quantdb 的因子来源，列出与快照目录的差异（只读，不触发重算） */
 export function getScanSources(dataset: FactorDataset = 'private', market: ResearchMarket = 'CN'): Promise<ScanDiff> {
   return requestJson<ScanDiff>(`/scan?dataset=${dataset}&market=${market}`, {}, 30000);
+}
+
+/**
+ * 把当前用户名下「待物化」的挖掘因子一次性送进 rd_mined（2026-11-28）。
+ *
+ * 每个因子执行的是挖掘时生成的 factor_code（每个人不同），服务端只筛
+ * 有代码、a_share、未定终态的条目；与 Alpha 研究的「物化选中」共用同一把
+ * flock，运行中再点会 409。
+ */
+export interface MaterializePendingResult {
+  started: boolean;
+  running: boolean;
+  requested: number;
+  materializable: string[];
+  skipped: Record<string, string>;
+  remaining: number;
+  message: string;
+}
+
+export async function materializeMyMinedFactors(): Promise<MaterializePendingResult> {
+  const res = await apiClient.post('/alpha-agent/factors/materialize-pending');
+  const data = res.data?.data ?? {};
+  const skipped: Record<string, string> = {};
+  if (data.skipped && typeof data.skipped === 'object') {
+    for (const [key, value] of Object.entries(data.skipped)) {
+      skipped[key] = String(value);
+    }
+  }
+  return {
+    started: Boolean(data.started),
+    running: Boolean(data.running),
+    requested: typeof data.requested === 'number' ? data.requested : 0,
+    materializable: Array.isArray(data.materializable) ? data.materializable.map(String) : [],
+    skipped,
+    remaining: typeof data.remaining === 'number' ? data.remaining : 0,
+    message: typeof data.message === 'string' ? data.message : '',
+  };
 }
 
 // ---------------------------------------------------------------------------

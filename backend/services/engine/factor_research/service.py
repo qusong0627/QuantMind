@@ -914,13 +914,18 @@ def scan_sources(dataset: str = "private", market: str = "CN") -> dict:
             "私人因子库快照缺失（请先一键计算，产物 factor_research_private/factors.json）"
         )
     factors = [e for e in f.get("factors", []) if e.get("code")]
+    discovered = discovery.scan_libraries(market=mk)
     out = discovery.diff_catalog(
-        discovery.scan_libraries(market=mk),
+        discovered,
         {e["code"] for e in factors},
         catalog_library={
             e["code"]: discovery.source_of(e.get("wind_source", "")) for e in factors
         },
     )
+    libraries = discovery.library_freshness(market=mk, discovered=discovered)
+    for item in libraries:
+        item["new_count"] = out["new_by_library"].get(item["library"], 0)
+    out["libraries"] = libraries
     meta = f.get("meta", {})
     out["dataset"] = dataset
     out["market"] = mk

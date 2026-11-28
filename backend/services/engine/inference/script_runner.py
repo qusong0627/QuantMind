@@ -579,7 +579,11 @@ class InferenceScriptRunner:
                 if status.max_date and trade_date > status.max_date:
                     return {
                         "ready": False,
-                        "detail": f"QuantDB {source} 最新可用 {status.max_date}，请求 {trade_date} 超出数据范围",
+                        "reason": "factor_stale",
+                        "detail": (
+                            f"因子源 {source} 最新只到 {status.max_date}，请求 {trade_date} "
+                            "超出范围；请先物化该因子库再推理（这不是模型坏了）"
+                        ),
                         "latest_available_date": status.max_date,
                     }
                 if status.min_date and trade_date < status.min_date:
@@ -636,6 +640,43 @@ class InferenceScriptRunner:
                     "ready": False,
                     "detail": f"missing mapped fields: {missing[:5]}",
                 }
+            # 列在 schema 里、但当日整列为空，同样是「没有原始因子数据」：
+            # 推理端会拿 NaN→0 填充，产出的分数看着正常却没有依据（2026-11-28
+            # fused189 11-27 有 27 列全空，正是这种形态）。只拦**整列全空**，
+            # 不按个股缺失率拦——正常因子的稀疏覆盖不该被误杀。
+            if features and trade_date:
+                try:
+                    day_frame = reader.read_day(
+                        source,
+                        features=features,
+                        trade_date=trade_date,
+                        feature_sources=field_sources or None,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 读不到就当数据不可用
+                    return {
+                        "ready": False,
+                        "reason": "factor_read_failed",
+                        "detail": (
+                            f"因子源 {source} 在 {trade_date} 读取失败（{exc}）；"
+                            "请先物化该因子库再推理（这不是模型坏了）"
+                        ),
+                    }
+                empty_cols = [
+                    name
+                    for name in features
+                    if name in day_frame.columns and not day_frame[name].notna().any()
+                ]
+                if empty_cols:
+                    return {
+                        "ready": False,
+                        "reason": "factor_empty_columns",
+                        "detail": (
+                            f"因子源 {source} 在 {trade_date} 有 {len(empty_cols)} 个"
+                            f"所需列整列为空（{', '.join(empty_cols[:5])}…）；"
+                            "没有原始因子数据推理出来的结果不可用，请先物化该因子库"
+                            "（这不是模型坏了）"
+                        ),
+                    }
             result: dict = {"ready": True, "detail": "ok"}
             if hash_drift:
                 result["schema_drift"] = {

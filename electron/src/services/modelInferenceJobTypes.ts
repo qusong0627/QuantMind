@@ -22,6 +22,8 @@ export interface BackfillPreviewModel {
   factor_latest_date?: string | null;
   factor_lag_days?: number;
   factor_stale?: boolean;
+  factor_incomplete?: boolean;
+  factor_missing_count?: number;
   estimated_seconds: number;
   eligible: boolean;
   reason: string | null;
@@ -108,6 +110,7 @@ export const BACKFILL_REASON_LABELS: Record<string, string> = {
   skipped_busy: '该模型正在别处推理',
   market_mismatch: '其他市场（本任务不含）',
   gap_too_large: '缺口过大',
+  factor_incomplete: '因子源缺列',
 };
 
 export function backfillReasonLabel(reason: string | null | undefined): string {

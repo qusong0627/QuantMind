@@ -2142,6 +2142,118 @@ async def post_factor_materialize(request: Request, body: FactorMaterializeReque
     }
 
 
+@router.post("/factors/materialize-pending")
+async def post_factor_materialize_pending(request: Request):
+    """把当前用户名下**所有待物化**的挖掘因子一次性送进 rd_mined。
+
+    与 ``POST /factors/materialize`` 同一把 flock / 同一启动纪律；区别只是
+    factor_ids 由服务端按「当前用户 + 可物化 + 未定终态」筛出来，省去前端逐条
+    勾选。``factor_ids`` 端点仍保留（精确重跑/force 用）。
+
+    这是「每个人不同的物化程序」的入口：每个因子执行的是挖掘时生成的
+    ``factor_code``，不是共享脚本；只接受有代码、a_share、未物化的因子。
+    """
+    auth_user_id, _ = get_authenticated_identity(request)
+
+    from backend.scripts.rd_mined_materialize import (
+        _eligible_row,
+        _lib_root,
+        _load_manifest,
+        _query_candidates,
+        _should_materialize,
+        _web_log_path,
+        build_run_command,
+        probe_run_lock,
+        project_root,
+    )
+    from backend.shared.rd_mined_materialize_launch import (
+        START_GUARD,
+        MaterializeSpawnError,
+        spawn_materialize,
+    )
+
+    rows = await _query_candidates(ensure=False)
+    owned = [row for row in rows if str(row.get("user_id") or "") == auth_user_id]
+    manifest = _load_manifest(_lib_root())
+    skipped: dict[str, str] = {}
+    eligible: list[str] = []
+    for row in owned:
+        factor_id = str(row.get("factor_id") or "")
+        if not factor_id:
+            continue
+        ok, reason = _eligible_row(row)
+        if not ok:
+            skipped[factor_id] = reason
+            continue
+        ok, reason = _should_materialize(row, manifest, force=False)
+        if not ok:
+            skipped[factor_id] = reason
+            continue
+        eligible.append(factor_id)
+
+    materializable = eligible[:100]
+    remaining = max(0, len(eligible) - len(materializable))
+    if not materializable:
+        return {
+            "code": 200,
+            "data": {
+                "started": False,
+                "running": probe_run_lock(),
+                "requested": len(owned),
+                "materializable": [],
+                "skipped": skipped,
+                "remaining": 0,
+                "message": "没有可物化的因子（未挖掘/无代码/非 a_share/已物化）",
+            },
+        }
+    if probe_run_lock():
+        raise HTTPException(
+            status_code=409,
+            detail="已有物化进程在运行，本次未启动（物化独占同一座库，避免并发写坏分区）",
+        )
+    if not START_GUARD.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409, detail="上一次启动确认尚未完成，请稍后重试"
+        )
+    try:
+        try:
+            result = await spawn_materialize(
+                command=build_run_command(materializable),
+                log_path=_web_log_path(),
+                cwd=project_root(),
+                probe=probe_run_lock,
+                log_holder=logger,
+                confirm_timeout_s=_MATERIALIZE_CONFIRM_TIMEOUT_S,
+                confirm_poll_s=_MATERIALIZE_CONFIRM_POLL_S,
+            )
+        except MaterializeSpawnError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    finally:
+        START_GUARD.release()
+
+    return {
+        "code": 200,
+        "data": {
+            "started": True,
+            "running": bool(result["confirmed"]),
+            "confirmed": bool(result["confirmed"]),
+            "pid": result["pid"],
+            "log_path": result["log_path"],
+            "requested": len(owned),
+            "materializable": materializable,
+            "skipped": skipped,
+            "remaining": remaining,
+            "message": (
+                f"物化已确认在后台运行：{len(materializable)} 个因子"
+                + (f"（另有 {remaining} 个待下一轮）" if remaining else "")
+                + "；完成后自动刷新字段注册与训练目录"
+                if result["confirmed"]
+                else "物化进程已启动但暂未确认持锁，请稍后刷新状态"
+            ),
+        },
+    }
+
+
 @router.get("/factors/materialize/status")
 async def get_factor_materialize_status(
     request: Request,

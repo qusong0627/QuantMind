@@ -3288,6 +3288,8 @@ def _build_precheck_items(
     }
     if readiness.get("latest_available_date"):
         market_data_item["latest_available_date"] = readiness["latest_available_date"]
+    if readiness.get("reason"):
+        market_data_item["reason"] = readiness["reason"]
     items.append(market_data_item)
 
     # 因子库列名漂移：不阻断，但必须可见。放行是因为「模型要用的列都在」，
@@ -3334,6 +3336,22 @@ def _precheck_passed(items: list[dict[str, Any]]) -> bool:
     return all(
         bool(item.get("passed")) for item in items if item.get("severity") != "soft"
     )
+
+
+def _precheck_failure_message(items: list[dict[str, Any]]) -> str:
+    """把硬失败项压成一句可读原因（前端/推理历史直接显示）。
+
+    2026-11-28：用户看到「推理前置检查未通过」会以为模型坏了；因子库没物化
+    与模型文件缺失是两类事，必须把具体项（如「因子源 fused189 最新只到
+    2026-11-23」）抬到 error_message，而不是只留一句通用失败。
+    """
+    details = [
+        f"{item.get('label') or item.get('key') or '检查项'}: "
+        f"{item.get('detail') or '未通过'}"
+        for item in items
+        if item.get("severity") != "soft" and not item.get("passed")
+    ]
+    return "；".join(details)[:1000] or "推理前置检查未通过"
 
 
 @router.get("/inference/precheck", summary="推理前置检查（用户态）")
@@ -3559,6 +3577,7 @@ async def _execute_single_day_inference(
     run_created_at = datetime.now(ZoneInfo("Asia/Shanghai"))
     provisional_run_id = f"ui_{data_trade_date.replace('-', '')}_{uuid.uuid4().hex[:8]}"
     if not precheck["passed"]:
+        precheck_error = _precheck_failure_message(precheck_items)
         failure_payload = {
             "success": False,
             "run_id": provisional_run_id,
@@ -3577,7 +3596,7 @@ async def _execute_single_day_inference(
             "fallback_used": False,
             "fallback_reason": "precheck_failed",
             "failure_stage": "precheck",
-            "error_message": "推理前置检查未通过",
+            "error_message": precheck_error,
             "stdout": "",
             "stderr": "",
             "precheck": precheck,
@@ -3605,7 +3624,7 @@ async def _execute_single_day_inference(
                 fallback_used=False,
                 fallback_reason="precheck_failed",
                 failure_stage="precheck",
-                error_message="推理前置检查未通过",
+                error_message=precheck_error,
                 stdout="",
                 stderr="",
                 active_model_id=resolved.effective_model_id,

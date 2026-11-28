@@ -994,7 +994,15 @@ export const ModelRegistryPage: React.FC = () => {
       }
       const precheck = await loadPrecheck(selectedModel.model_id, inferenceDateStr);
       if (!precheck?.passed) {
-        message.error('前置检查未通过，请先处理阻断项');
+        // 2026-11-28：不能只说「前置检查未通过」——因子库没物化与模型坏了
+        // 在用户眼里都是「不行」。把硬失败项原文抬到 toast。
+        const failed = (precheck?.items || []).filter(
+          (item) => item.severity !== 'soft' && !item.passed,
+        );
+        const detail = failed
+          .map((item) => `${item.label || item.key}: ${item.detail || '未通过'}`)
+          .join('；');
+        message.error(detail ? `前置检查未通过：${detail}` : '前置检查未通过，请先处理阻断项', 8);
         return;
       }
       const run = await modelTrainingService.runModelInference(

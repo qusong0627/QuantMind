@@ -208,6 +208,50 @@ async def test_mixed_foreign_reported_in_details(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_materialize_pending_own_factors_only(
+    isolate_env, monkeypatch, fake_candidates, fake_manifest
+):
+    """一键物化待办：只取当前用户、具备代码、a_share 的因子；他人/非 a_share 进 skipped。"""
+    fake_candidates.apply(
+        [
+            _row("f1"),
+            _row("f2", user_id="u2"),
+            _row("f3", market="hk"),
+            _row("f4", code=""),
+        ]
+    )
+    fake_manifest["current"] = {}
+    calls = _fake_spawn(monkeypatch)
+
+    resp = await aa.post_factor_materialize_pending(_fake_request("u1"))
+    data = resp["data"]
+    assert data["started"] is True
+    assert data["materializable"] == ["f1"]
+    assert data["requested"] == 3  # u1 名下三条（f3/f4 被跳过，f2 不属于该用户）
+    assert data["skipped"] == {"f3": "market_unsupported", "f4": "no_code"}
+    assert calls[0]["argv"] == mat.build_run_command(["f1"])
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_materialize_pending_nothing_eligible_does_not_spawn(
+    isolate_env, monkeypatch, fake_candidates, fake_manifest
+):
+    """名下没有可物化因子：如实回 started=false，不 spawn。"""
+    fake_candidates.apply([_row("f1", user_id="u2"), _row("f2", code="")])
+    fake_manifest["current"] = {}
+    _no_spawn(monkeypatch)
+
+    resp = await aa.post_factor_materialize_pending(_fake_request("u1"))
+    data = resp["data"]
+    assert data["started"] is False
+    assert data["materializable"] == []
+    assert data["skipped"] == {"f2": "no_code"}
+    assert "没有可物化的因子" in data["message"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad",
     [

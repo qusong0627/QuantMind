@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -80,14 +81,34 @@ class BackfillCoverage:
     market_latest_date: str | None = None
     factor_lag_days: int = 0
     factor_stale: bool = False
+    factor_incomplete: bool = False
+    factor_missing_features: tuple[str, ...] = ()
 
     @property
     def gap_count(self) -> int:
         return len(self.gap_dates)
 
+    @property
+    def factor_blocked(self) -> bool:
+        """因子源不可用于推理：落后市场，或最新分区有整列为空。"""
+        return self.factor_stale or self.factor_incomplete
+
 
 def factor_stale_message(coverage: BackfillCoverage) -> str:
-    """因子源落后市场时给用户的人话；不是模型坏了。"""
+    """因子源落后/缺列时给用户的人话；不是模型坏了。"""
+    if coverage.factor_incomplete:
+        preview = "、".join(coverage.factor_missing_features[:5])
+        more = (
+            f" 等 {len(coverage.factor_missing_features)} 列"
+            if len(coverage.factor_missing_features) > 5
+            else ""
+        )
+        return (
+            f"因子源 {coverage.factor_source} 最新日 {coverage.factor_latest_date} "
+            f"有 {len(coverage.factor_missing_features)} 个所需列整列为空"
+            f"（{preview}{more}）。没有原始因子数据推理出来的结果不可用，"
+            "请先物化该因子库再推理（这不是模型坏了）。"
+        )
     if not coverage.factor_stale:
         return ""
     return (
@@ -311,7 +332,7 @@ def quantdb_latest_factor_date(market: str = "CN") -> date | None:
         return None
 
 
-def _quantdb_available_dates(model: BackfillModel) -> tuple[str, list[str]]:
+def _factor_identity(model: BackfillModel) -> tuple[str, str]:
     context = (
         model.metadata.get("context")
         if isinstance(model.metadata.get("context"), dict)
@@ -323,19 +344,36 @@ def _quantdb_available_dates(model: BackfillModel) -> tuple[str, list[str]]:
         or "l1_factors"
     )
     market = str(context.get("market") or model.metadata.get("market") or model.market)
+    return factor_source, market
+
+
+def _quantdb_library_dir(model: BackfillModel, market: str) -> Path | None:
+    """模型因子源根目录：quantdb_dir pin 优先，否则市场默认目录。"""
     try:
         from backend.services.engine.data_platform.quantdb_factor_reader import (
-            QuantDBFactorReader,
             market_data_dir,
         )
         from backend.shared.quantdb_paths import resolve_pinned_data_dir
 
+        pinned = resolve_pinned_data_dir(model.metadata.get("quantdb_dir"))
+        qdir = Path(pinned) if pinned else market_data_dir(market)
+        return qdir if qdir.is_dir() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _quantdb_available_dates(model: BackfillModel) -> tuple[str, list[str]]:
+    factor_source, market = _factor_identity(model)
+    try:
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
+
         # 必须与推理执行端同一口径：metadata.quantdb_dir 优先（fused*/自定义库
         # 不在市场默认目录下），否则 available_dates 会读错库、把 freshness
         # 误报成「无数据」。pin 不可采纳时回落市场默认目录（与运行端一致）。
-        pinned = resolve_pinned_data_dir(model.metadata.get("quantdb_dir"))
-        qdir = Path(pinned) if pinned else market_data_dir(market)
-        if not qdir.is_dir():
+        qdir = _quantdb_library_dir(model, market)
+        if qdir is None:
             return factor_source, []
         reader = QuantDBFactorReader(qdir, market=market)
         return factor_source, [
@@ -364,12 +402,35 @@ def compute_coverage(
     market_cutoff_day = cutoff or quantdb_latest_factor_date(model.market) or latest_day
     market_latest_day = min(latest_day, market_cutoff_day)
     factor_source, factor_dates = _quantdb_available_dates(model)
+    _, factor_market = _factor_identity(model)
     factor_latest_day: date | None = None
     if factor_dates:
         try:
             factor_latest_day = date.fromisoformat(str(factor_dates[-1])[:10])
         except ValueError:
             factor_latest_day = None
+    factor_incomplete = False
+    factor_missing_features: tuple[str, ...] = ()
+    if factor_latest_day is not None and factor_source:
+        qdir = _quantdb_library_dir(model, factor_market)
+        sidecar = (
+            qdir
+            / "6_ml_datasets"
+            / factor_source
+            / f"dt={factor_latest_day.strftime('%Y%m%d')}"
+            / "_missing_features.json"
+            if qdir is not None
+            else None
+        )
+        if sidecar is not None and sidecar.is_file():
+            try:
+                payload = json.loads(sidecar.read_text(encoding="utf-8"))
+                factor_missing_features = tuple(
+                    str(value) for value in (payload.get("missing_features") or ())
+                )
+                factor_incomplete = bool(factor_missing_features)
+            except Exception:  # noqa: BLE001 - 侧车损坏按「未知」处理，不拦推理
+                factor_incomplete = False
     gap_end = (
         min(market_latest_day, factor_latest_day)
         if factor_latest_day is not None
@@ -390,6 +451,8 @@ def compute_coverage(
         "market_latest_date": str(market_latest_day),
         "factor_lag_days": factor_lag_days,
         "factor_stale": factor_lag_days > 0,
+        "factor_incomplete": factor_incomplete,
+        "factor_missing_features": factor_missing_features,
     }
     if not model.storage_path or not Path(model.storage_path).is_dir():
         return BackfillCoverage(

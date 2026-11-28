@@ -21,13 +21,19 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  FlaskConical,
   GraduationCap,
   Loader2,
   RefreshCw,
   ScanSearch,
   Search,
 } from 'lucide-react';
-import { getPromoteStatus, getScanSources, postPromote } from '../services/factorResearchService';
+import {
+  getPromoteStatus,
+  getScanSources,
+  materializeMyMinedFactors,
+  postPromote,
+} from '../services/factorResearchService';
 import type { FactorDataset, ScanDiff, ScanDiffItem } from '../services/factorResearchService';
 import type { ResearchMarket } from '../types/factorResearch';
 import { Card } from './common';
@@ -73,6 +79,13 @@ const Stat: React.FC<{ label: string; value: React.ReactNode; tone?: string }> =
     <span className={`text-[11px] font-bold font-mono ${tone || 'text-slate-700'}`}>{value}</span>
   </span>
 );
+
+/** 后端最新分区是 YYYYMMDD；展示成 YYYY-MM-DD，空值不冒充今天。 */
+function fmtLatestDt(value: string | null | undefined): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '—';
+  return raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}` : raw;
+}
 
 const Chip: React.FC<{ code: string; title?: string; tone?: 'emerald' | 'amber' }> = ({ code, title, tone = 'emerald' }) => (
   <span
@@ -171,6 +184,10 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
   const [promoteErr, setPromoteErr] = useState<string | null>(null);
   // 顶部筛选：库多/因子多时按名找；空串 = 不过滤
   const [keyword, setKeyword] = useState('');
+  // 当前用户挖掘因子的一键物化（rd_mined）；与 Alpha 研究共用服务端 flock
+  const [materializing, setMaterializing] = useState(false);
+  const [materializeMsg, setMaterializeMsg] = useState('');
+  const [materializeErr, setMaterializeErr] = useState('');
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -199,6 +216,21 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
       setPromoteErr(e instanceof Error ? e.message : String(e));
     }
   }, [promoting]);
+
+  const startMaterialize = useCallback(async () => {
+    if (materializing) return;
+    setMaterializing(true);
+    setMaterializeErr('');
+    setMaterializeMsg('');
+    try {
+      const res = await materializeMyMinedFactors();
+      setMaterializeMsg(res.message || (res.started ? '物化已启动' : '没有可物化的因子'));
+    } catch (e: unknown) {
+      setMaterializeErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMaterializing(false);
+    }
+  }, [materializing]);
 
   // 毕业轮询：子进程结束后重新扫描 —— 待毕业数应清零，新增列表里也会出现
   // 刚毕业的挖掘因子（下一步就是「重算快照」把它们收进目录）。
@@ -265,6 +297,16 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
               {scanning ? '扫描中…' : '重新扫描'}
             </button>
             <button
+              data-testid="scan-materialize"
+              onClick={() => void startMaterialize()}
+              disabled={materializing}
+              className="flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-[10px] font-bold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+              title="把当前用户名下待物化的挖掘因子送进 rd_mined 训练库（每个因子执行自己的代码；与 Alpha 研究共用物化锁）。完成后点「重新扫描」/「重算快照」可见。"
+            >
+              {materializing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FlaskConical className="w-3 h-3" />}
+              {materializing ? '物化中…' : '物化我的因子'}
+            </button>
+            <button
               onClick={onRebuild}
               className="flex items-center gap-1 rounded-full bg-indigo-600 px-3 py-0.5 text-[10px] font-bold text-white hover:bg-indigo-700"
               title="全量扫描 6_ml_datasets 重建索引（5~15 分钟，本地计算）"
@@ -296,6 +338,69 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
               <span className="text-[10px] text-slate-400">快照建于 {diff.snapshot_at}</span>
             )}
           </div>
+
+          {(materializeMsg || materializeErr) && (
+            <div
+              data-testid="scan-materialize-msg"
+              className={`shrink-0 mt-1.5 rounded-lg border px-2.5 py-1 text-[10px] ${
+                materializeErr
+                  ? 'border-rose-100 bg-rose-50 text-rose-600'
+                  : 'border-emerald-100 bg-emerald-50 text-emerald-700'
+              }`}
+            >
+              {materializeErr || materializeMsg}
+              {materializeMsg && !materializeErr ? (
+                <span className="ml-1 text-emerald-500/80">完成后点「重新扫描」查看新因子。</span>
+              ) : null}
+            </div>
+          )}
+
+          {/* 最新时间列（2026-11-28 用户口径）：每个库的数据停在哪一天，一眼可见。
+              同一次扫描里最晚的日期作为基准；落后于它的库标琥珀色，避免「因子有、
+              数据没到最新」被当成快照/重算的问题。 */}
+          {!!diff?.libraries?.length && (() => {
+            const latestMax = diff.libraries.reduce(
+              (acc, lib) => (lib.latest_dt && lib.latest_dt > acc ? lib.latest_dt : acc),
+              '',
+            );
+            return (
+              <div
+                data-testid="scan-libraries"
+                className="shrink-0 mt-1.5 overflow-hidden rounded-lg border border-slate-100 bg-white"
+              >
+                <table className="w-full border-collapse text-[10px]">
+                  <thead>
+                    <tr className="bg-slate-50 text-slate-400">
+                      <th className="px-2 py-1 text-left font-bold">因子库</th>
+                      <th className="px-2 py-1 text-right font-bold">最新数据日</th>
+                      <th className="px-2 py-1 text-right font-bold">因子数</th>
+                      <th className="px-2 py-1 text-right font-bold">新增</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diff.libraries.map((lib) => {
+                      const stale = !!latestMax && !!lib.latest_dt && lib.latest_dt < latestMax;
+                      return (
+                        <tr key={lib.library} className="border-t border-slate-50">
+                          <td className="px-2 py-0.5 text-slate-600">{lib.label || lib.library}</td>
+                          <td
+                            className={`px-2 py-0.5 text-right font-mono ${stale ? 'text-amber-600 font-bold' : 'text-slate-500'}`}
+                            title={stale ? '落后于本次扫描的最新日期，请先物化该因子库' : undefined}
+                          >
+                            {fmtLatestDt(lib.latest_dt)}
+                          </td>
+                          <td className="px-2 py-0.5 text-right font-mono text-slate-500">{lib.factor_count}</td>
+                          <td className={`px-2 py-0.5 text-right font-mono ${lib.new_count ? 'text-emerald-600 font-bold' : 'text-slate-400'}`}>
+                            {lib.new_count}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
 
           {/* 筛选框：单库 400+ 因子时按名找，比滚动快 */}
           {nNew > 20 && (

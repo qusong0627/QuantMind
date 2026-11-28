@@ -187,11 +187,15 @@ export const InferenceCoveragePanel: React.FC<InferenceCoveragePanelProps> = ({ 
   return (
     <div className="space-y-4">
       <style>{`.inference-backfill-modal-wrap .ant-modal{top:200px !important;} .inference-backfill-modal-wrap.ant-modal-wrap{padding-top:100px;}`}</style>
-      {coverage?.factor_stale && (
+      {(coverage?.factor_stale || coverage?.factor_incomplete) && (
         <Alert
           type="warning"
           showIcon
-          message={`因子源 ${coverage?.factor_source ?? '—'} 落后 ${coverage?.factor_lag_days ?? 0} 个交易日`}
+          message={
+            coverage?.factor_incomplete
+              ? `因子源 ${coverage?.factor_source ?? '—'} 最新日缺 ${(coverage?.factor_missing_features || []).length} 个因子列`
+              : `因子源 ${coverage?.factor_source ?? '—'} 落后 ${coverage?.factor_lag_days ?? 0} 个交易日`
+          }
           description={coverage?.factor_stale_message || `因子源最新 ${coverage?.factor_latest_date ?? '—'}，市场最新 ${coverage?.market_latest_date ?? '—'}；这不是模型坏了，请先物化该因子库。`}
         />
       )}
@@ -222,7 +226,7 @@ export const InferenceCoveragePanel: React.FC<InferenceCoveragePanelProps> = ({ 
           <div className="text-[11px] text-slate-400 font-bold">最新交易日</div>
           <div className="text-lg font-mono font-black text-slate-800">{coverage?.latest_trade_date ?? '—'}</div>
           <div className="text-[11px] mt-1 flex items-center justify-center gap-1">
-            {coverage?.factor_stale ? <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">因子落后 {coverage?.factor_lag_days ?? 0} 日</span></> : isUpToDate ? <><CheckCircle2 size={12} className="text-emerald-500"/> <span className="text-emerald-600 font-bold">已是最新</span></> : <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">缺口 {gapCount} 日</span></>}
+            {coverage?.factor_incomplete ? <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">因子缺列 { (coverage?.factor_missing_features || []).length }</span></> : coverage?.factor_stale ? <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">因子落后 {coverage?.factor_lag_days ?? 0} 日</span></> : isUpToDate ? <><CheckCircle2 size={12} className="text-emerald-500"/> <span className="text-emerald-600 font-bold">已是最新</span></> : <><AlertTriangle size={12} className="text-amber-500"/> <span className="text-amber-600 font-bold">缺口 {gapCount} 日</span></>}
           </div>
         </Card>
         <Card size="small" className="rounded-2xl text-center">
