@@ -61,6 +61,22 @@ def _last_tag() -> str:
     return _tags()[-1]
 
 
+def valuation_stamp() -> int:
+    """估值聚合文件 / 分区目录的版本戳（mtime ns），用于缓存失效。
+
+    市场阶段 API 用 lru_cache 缓存整张面板；KLINE 的 last_tag 一天只变一次，
+    而 `valuation_daily.parquet` 可能在同一天夜间被重建——只按 last_tag 缓存
+    会让 PB 便宜分位继续停在旧日期。把估值文件戳并进缓存键即可自动失效。
+    """
+    stamps: list[int] = []
+    for path in (VAL, VAL_DIR):
+        try:
+            stamps.append(path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return max(stamps, default=0)
+
+
 @functools.lru_cache(maxsize=1)
 def _all_symbols() -> frozenset[str]:
     t = pq.read_table(
@@ -107,7 +123,12 @@ def _roll_pct(s: pd.Series, window: int = 756, min_periods: int = 500) -> pd.Ser
 
 
 @functools.lru_cache(maxsize=20)
-def universe_valuation(code: str, last_tag: str, tags_n: int = 800) -> pd.DataFrame:  # noqa: ARG001
+def universe_valuation(
+    code: str,
+    last_tag: str,
+    tags_n: int = 800,
+    val_stamp: int = 0,  # noqa: ARG001 —— 仅作为缓存键，估值文件重建后自动失效
+) -> pd.DataFrame:
     """该宇宙成分股的市值加权 PB/EP 历史与滚动 3 年便宜分位。
 
     ALL 直接用预计算的 `valuation_daily.parquet`（全市场）；
@@ -152,7 +173,7 @@ def universe_valuation(code: str, last_tag: str, tags_n: int = 800) -> pd.DataFr
 
 
 @functools.lru_cache(maxsize=24)
-def build_frame(code: str, last_tag: str) -> pd.DataFrame:  # noqa: ARG001
+def build_frame(code: str, last_tag: str, val_stamp: int = 0) -> pd.DataFrame:  # noqa: ARG001
     """构建该宇宙最近 320 个交易日的广度 + 指数行情面板。"""
     from backend.scripts.market_stage_dashboard import load_index
 
@@ -238,13 +259,13 @@ def build_frame(code: str, last_tag: str) -> pd.DataFrame:  # noqa: ARG001
         .rolling(500, min_periods=250)
         .apply(lambda s: float((s.iloc[-1] >= s).mean()), raw=False)
     )
-    v = universe_valuation(code, _last_tag())
+    v = universe_valuation(code, _last_tag(), 800, val_stamp)
     out = out.join(v[["bp_capw_pct", "ep_capw_pct", "med_pe"]], how="left")
     return out
 
 
 @functools.lru_cache(maxsize=12)
-def quadrant_long(code: str, last_tag: str) -> pd.DataFrame:  # noqa: ARG001
+def quadrant_long(code: str, last_tag: str, val_stamp: int = 0) -> pd.DataFrame:  # noqa: ARG001
     """2×2 长窗口散点（2016 起）：距年线 × PB 便宜分位 × 未来 250 日收益。
 
     `build_frame` 只有 560 日，MA250 与未来 250 日同时有效的样本只剩约 60 天
@@ -268,7 +289,7 @@ def quadrant_long(code: str, last_tag: str) -> pd.DataFrame:  # noqa: ARG001
             "fwd250": c.shift(-250) / c - 1.0,
         }
     )
-    v = universe_valuation(code, _last_tag(), 0)
+    v = universe_valuation(code, _last_tag(), 0, val_stamp)
     return out.join(v[["bp_capw_pct"]], how="left")
 
 

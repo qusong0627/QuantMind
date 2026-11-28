@@ -9,9 +9,12 @@ trade_date——流式刷新把 latest.json 推到新交易日后，离线任务
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from backend.services.engine.tasks import celery_tasks
@@ -21,6 +24,19 @@ class _FakeProc:
     returncode = 0
     stdout = "[fake] ok"
     stderr = ""
+
+
+def _command_text(calls: list[list[str]]) -> list[str]:
+    return [" ".join(str(part) for part in cmd) for cmd in calls]
+
+
+def _compute_calls(calls: list[list[str]]) -> list[str]:
+    """只看真正产出快照的 compute.py，忽略广度/TRIN/估值等前置刷新。"""
+    return [cmd for cmd in _command_text(calls) if "market_snapshot/compute.py" in cmd]
+
+
+def _valuation_calls(calls: list[list[str]]) -> list[str]:
+    return [cmd for cmd in _command_text(calls) if "market_valuation_bottom" in cmd]
 
 
 @pytest.fixture()
@@ -53,7 +69,7 @@ def _patch_state(
 def test_skips_when_up_to_date_and_dated_db_exists(
     monkeypatch: pytest.MonkeyPatch, env: dict[str, Any]
 ) -> None:
-    """latest.json 已最新且日期库在场 → 跳过，不触发子进程。"""
+    """latest.json 已最新且日期库在场 → 跳过快照计算（前置广度/估值刷新仍会跑）。"""
     _patch_state(monkeypatch, "20260930", "20260930")
     (env["out_dir"] / "2026-09-30.db").write_bytes(b"")
 
@@ -61,7 +77,7 @@ def test_skips_when_up_to_date_and_dated_db_exists(
 
     assert result["status"] == "skipped"
     assert result["reason"] == "stale"
-    assert env["calls"] == []
+    assert _compute_calls(env["calls"]) == []
 
 
 def test_forces_rebuild_when_dated_db_missing(
@@ -73,7 +89,8 @@ def test_forces_rebuild_when_dated_db_missing(
     result = celery_tasks.run_market_snapshot()
 
     assert result["status"] == "success"
-    assert len(env["calls"]) == 1
+    assert len(_compute_calls(env["calls"])) == 1
+    assert len(_valuation_calls(env["calls"])) == 1
 
 
 def test_runs_when_partition_newer_than_latest(
@@ -85,7 +102,7 @@ def test_runs_when_partition_newer_than_latest(
     result = celery_tasks.run_market_snapshot()
 
     assert result["status"] == "success"
-    assert len(env["calls"]) == 1
+    assert len(_compute_calls(env["calls"])) == 1
 
 
 def test_runs_when_no_latest_freshness_known(
@@ -97,4 +114,36 @@ def test_runs_when_no_latest_freshness_known(
     result = celery_tasks.run_market_snapshot()
 
     assert result["status"] == "success"
-    assert len(env["calls"]) == 1
+    assert len(_compute_calls(env["calls"])) == 1
+
+
+def _write_panel(path: Path, day: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"date": [day]}), path)
+
+
+def test_valuation_panel_stale_when_aggregate_behind(tmp_path: Path) -> None:
+    """聚合文件停在旧日期、上游已有新分区 → 必须重建（PB 便宜分位停更的回归）。"""
+    (tmp_path / "5_technical_derived" / "valuation" / "dt=20261127").mkdir(parents=True)
+    panel = (
+        tmp_path / "5_technical_derived" / "market_breadth" / "valuation_daily.parquet"
+    )
+    _write_panel(panel, datetime(2026, 11, 13))
+
+    need, latest = celery_tasks._valuation_panel_stale(str(tmp_path))
+
+    assert latest == "20261127"
+    assert need is True
+
+
+def test_valuation_panel_fresh_when_aggregate_matches(tmp_path: Path) -> None:
+    (tmp_path / "5_technical_derived" / "valuation" / "dt=20261127").mkdir(parents=True)
+    panel = (
+        tmp_path / "5_technical_derived" / "market_breadth" / "valuation_daily.parquet"
+    )
+    _write_panel(panel, datetime(2026, 11, 27))
+
+    need, latest = celery_tasks._valuation_panel_stale(str(tmp_path))
+
+    assert latest == "20261127"
+    assert need is False

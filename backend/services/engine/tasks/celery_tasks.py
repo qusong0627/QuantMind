@@ -1556,6 +1556,69 @@ def _snapshot_source_state(data_dir: str, out_dir: str) -> tuple[str | None, str
     return max_part, latest_td
 
 
+#: 估值分位聚合面板与上游分区（相对 QM_QUANTDB_DATA_DIR）。
+_VALUATION_PARTITION_REL = "5_technical_derived/valuation"
+_VALUATION_PANEL_REL = "5_technical_derived/market_breadth/valuation_daily.parquet"
+
+
+def _valuation_panel_stale(data_dir: str) -> tuple[bool, str | None]:
+    """估值聚合面板是否落后于最新 valuation 分区；返回 (需要重建, 最新分区 tag)。"""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    root = Path(data_dir)
+    val_dir = root / _VALUATION_PARTITION_REL
+    tags = sorted(p.name for p in val_dir.glob("dt=*")) if val_dir.is_dir() else []
+    latest_tag = tags[-1].split("=")[-1] if tags else None
+    panel = root / _VALUATION_PANEL_REL
+    if latest_tag is None or not panel.is_file():
+        return True, latest_tag
+    try:
+        col = pq.read_table(panel, columns=["date"]).column("date")
+        last = str(pc.max(col).as_py())[:10].replace("-", "")
+        return last != latest_tag, latest_tag
+    except Exception:
+        return True, latest_tag
+
+
+def _rebuild_valuation_panel_if_stale(
+    data_dir: str, project_root: str
+) -> dict[str, Any]:
+    """重建全市场估值分位聚合面板（valuation_daily.parquet）。
+
+    市场阶段「PB 便宜分位」、估值底部信号、长期 2×2 散点都读它；上游
+    ``valuation/dt=*`` 由每日同步更新，但聚合文件此前没有任何调度重建，
+    2026-11-13 后停更（11-28 用户报「市场阶段只到 11-13」）。全量重算约
+    10~30s，按最新估值分区做新鲜度门控，已最新则 no-op。
+    """
+    import subprocess
+    import sys
+
+    need, latest_tag = _valuation_panel_stale(data_dir)
+    if not need:
+        return {"status": "skipped", "latest": latest_tag}
+    proc = subprocess.run(
+        [sys.executable, "-m", "backend.scripts.market_valuation_bottom", "--build"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "[Valuation] 估值分位面板生成失败 code=%d stderr=%s",
+            proc.returncode,
+            proc.stderr[-1500:],
+        )
+        return {
+            "status": "failed",
+            "returncode": proc.returncode,
+            "latest": latest_tag,
+        }
+    logger.info("[Valuation] 估值分位面板已更新至 %s", latest_tag)
+    return {"status": "updated", "latest": latest_tag}
+
+
 @celery_app.task(name="engine.tasks.market_snapshot")
 def run_market_snapshot() -> dict[str, Any]:
     """在服务器容器内计算市场分析快照，写入 QM_MARKET_SNAPSHOT_DIR。
@@ -1662,6 +1725,18 @@ def run_market_snapshot() -> dict[str, Any]:
         except Exception as texc:  # noqa: BLE001
             logger.warning("[MarketSnapshot][Trin] 异常（情绪回看将卡在旧交易日）: %s", texc)
 
+        # 全市场估值分位面板（valuation_daily.parquet）：市场阶段「PB 便宜分位」、
+        # 估值底部信号、长期 2×2 散点都读它。上游 valuation/dt=* 每日更新，但这个
+        # 聚合文件此前**没有任何调度重建**——2026-11-14 之后一直停在 11-13
+        # （11-28 用户报市场阶段 PB 只到 11-13）。
+        try:
+            _rebuild_valuation_panel_if_stale(str(data_dir), str(root))
+        except Exception as ve:  # noqa: BLE001
+            logger.warning(
+                "[MarketSnapshot][Valuation] 异常（市场阶段 PB 分位将停在旧日期）: %s",
+                ve,
+            )
+
         # 大盘情绪快照：与市场快照同源（同一份后复权日线）、同频（T 日盘后一次）。
         # 独立 try/except —— 情绪快照失败只告警，绝不影响市场分析主链路。
         # 新鲜度自门控：已是最新交易日则不重跑，避免 04:00–05:50 每 10 分钟白算。
@@ -1758,6 +1833,16 @@ def run_market_regime_snapshot(date: str | None = None) -> dict[str, Any]:
     from backend.shared.scheduler_registry import heartbeat as _sched_heartbeat
 
     _sched_heartbeat("market_regime_snapshot")
+
+    # 市场阶段快照直接读 PB 便宜分位聚合面板；先按需重建，避免 23:30 / 06:30
+    # 用到上一交易日甚至更早的估值（上游 valuation 分区每晚才更新）。
+    try:
+        _rebuild_valuation_panel_if_stale(
+            os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb"),
+            str(Path(__file__).resolve().parents[4]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[MarketRegimeSnapshot] 估值面板刷新异常: %s", exc)
 
     snap = build_snapshot(date)
     path = write_snapshot(snap)

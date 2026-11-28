@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -26,3 +29,22 @@ def test_roll_pct_requires_min_periods():
     assert np.isnan(out.iloc[0])
     assert out.iloc[1] == 1.0
     assert out.iloc[2] == 1.0
+
+
+def test_valuation_stamp_changes_when_panel_rebuilt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """估值聚合文件重建后，市场阶段 API 的缓存键必须变化（PB 停更回归）。"""
+    from backend.services.api.market_analysis import regime_universe as ru
+
+    panel = tmp_path / "valuation_daily.parquet"
+    panel.write_bytes(b"x")
+    val_dir = tmp_path / "valuation"
+    val_dir.mkdir()
+    monkeypatch.setattr(ru, "VAL", panel)
+    monkeypatch.setattr(ru, "VAL_DIR", val_dir)
+
+    first = ru.valuation_stamp()
+    os.utime(panel, ns=(first + 10_000, first + 10_000))
+
+    assert ru.valuation_stamp() > first

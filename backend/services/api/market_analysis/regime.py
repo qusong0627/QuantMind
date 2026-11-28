@@ -33,6 +33,7 @@ from .regime_universe import (  # noqa: E402
     quadrant_long,
     score_history,
     universe_symbols,
+    valuation_stamp,
 )
 
 ROOT = Path(os.environ.get("QM_QUANTDB_DATA_DIR", "/data/quantdb"))
@@ -480,7 +481,7 @@ def market_regime(
     universe = universe if isinstance(universe, str) else "ALL"
     if universe not in UNIVERSE_LABELS:
         raise HTTPException(status_code=400, detail=f"未知 universe: {universe}")
-    d = build_frame(universe, _last_kline_tag())
+    d = build_frame(universe, _last_kline_tag(), valuation_stamp())
     ts = _pick(d, date)
     r = d.loc[ts]
     cheap = float(r["bp_capw_pct"]) if np.isfinite(r["bp_capw_pct"]) else 0.5
@@ -741,7 +742,9 @@ def market_regime(
         "events": events,
         "stock_breadth": _stock_breadth(ts, universe),
         "charts": _series(d, ts),
-        "quadrant": _quadrant(r, quadrant_long(universe, _last_kline_tag())),
+        "quadrant": _quadrant(
+            r, quadrant_long(universe, _last_kline_tag(), valuation_stamp())
+        ),
         "intraday": intra,
         "sector": _sector_snapshot(ts, universe),
         "blocks": blocks,
@@ -780,8 +783,8 @@ DEFAULT_COMPARE = (
 )
 
 
-def _compare_item(code: str, ts: pd.Timestamp) -> dict:
-    d = build_frame(code, _last_kline_tag()).loc[:ts]
+def _compare_item(code: str, ts: pd.Timestamp, val_stamp: int = 0) -> dict:
+    d = build_frame(code, _last_kline_tag(), val_stamp).loc[:ts]
     if d.empty:
         return {"code": code, "label": UNIVERSE_LABELS[code], "date": None}
     sc = score_history(d)
@@ -818,13 +821,15 @@ def _compare_item(code: str, ts: pd.Timestamp) -> dict:
 
 
 @functools.lru_cache(maxsize=16)
-def _compare_cached(date_str: str, codes: tuple[str, ...], last_tag: str) -> list[dict]:
+def _compare_cached(
+    date_str: str, codes: tuple[str, ...], last_tag: str, val_stamp: int = 0
+) -> list[dict]:
     _ = last_tag
     items = []
     for code in codes:
-        d = build_frame(code, _last_kline_tag())
+        d = build_frame(code, _last_kline_tag(), val_stamp)
         ts = _pick(d, date_str or None)
-        items.append(_compare_item(code, ts))
+        items.append(_compare_item(code, ts, val_stamp))
     return items
 
 
@@ -844,7 +849,7 @@ def regime_compare(
     for code in codes:
         if code not in UNIVERSE_LABELS:
             raise HTTPException(status_code=400, detail=f"未知 universe: {code}")
-    items = _compare_cached(date or "", codes, _last_kline_tag())
+    items = _compare_cached(date or "", codes, _last_kline_tag(), valuation_stamp())
     return {"date": items[0].get("date") if items else None, "items": items}
 
 
@@ -860,7 +865,7 @@ def regime_sector_stocks(
     universe = universe if isinstance(universe, str) else "ALL"
     if universe not in UNIVERSE_LABELS:
         raise HTTPException(status_code=400, detail=f"未知 universe: {universe}")
-    d = build_frame(universe, _last_kline_tag())
+    d = build_frame(universe, _last_kline_tag(), valuation_stamp())
     ts = _pick(d, date)
     return {
         "date": ts.strftime("%Y-%m-%d"),

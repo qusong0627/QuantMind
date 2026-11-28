@@ -73,7 +73,11 @@ def build_panel() -> pd.DataFrame:
         )
     # med_pe 越低越便宜，翻转成“便宜分位”
     df["med_pe_cheap_pct"] = 1.0 - df["med_pe_pct"]
-    df.to_parquet(OUT)
+    # 原子落盘：夜间重建时 API 可能正在读，先写临时文件再 replace，避免读到半份 parquet。
+    # 临时名带 PID：快照任务与手工重建并发时不会互相踩同一份 tmp。
+    tmp = OUT.with_name(f"{OUT.name}.{os.getpid()}.tmp")
+    df.to_parquet(tmp)
+    os.replace(tmp, OUT)
     return df
 
 
