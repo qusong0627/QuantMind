@@ -177,6 +177,8 @@ export interface ScanLibraryInfo {
   latest_dt: string | null;
   factor_count: number;
   new_count: number;
+  /** 最新分区侧车记录的缺列数（0/null = 无标记） */
+  missing_count?: number;
 }
 
 export interface ScanDiff {

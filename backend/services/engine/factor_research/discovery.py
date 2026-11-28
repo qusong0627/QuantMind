@@ -272,12 +272,22 @@ def library_freshness(
     for lib, names in libs.items():
         parts = sorted((root / lib).glob("dt=*/data.parquet"))
         latest = parts[-1].parent.name.split("=", 1)[1] if parts else None
+        missing_count = 0
+        if parts:
+            sidecar = parts[-1].parent / "_missing_features.json"
+            if sidecar.is_file():
+                try:
+                    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+                    missing_count = len(payload.get("missing_features") or ())
+                except Exception:  # noqa: BLE001 - 侧车损坏按无标记处理
+                    missing_count = 0
         rows.append(
             {
                 "library": lib,
                 "label": lib_label(lib),
                 "latest_dt": latest,
                 "factor_count": len(names),
+                "missing_count": missing_count,
             }
         )
     order = {name: idx for idx, name in enumerate(AUTO_PRIORITY)}

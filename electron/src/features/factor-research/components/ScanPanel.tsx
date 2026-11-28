@@ -375,23 +375,28 @@ export const ScanPanel: React.FC<Props> = ({ dataset, market, onRebuild, onClose
                       <th className="px-2 py-1 text-right font-bold">最新数据日</th>
                       <th className="px-2 py-1 text-right font-bold">因子数</th>
                       <th className="px-2 py-1 text-right font-bold">新增</th>
+                      <th className="px-2 py-1 text-right font-bold">缺列</th>
                     </tr>
                   </thead>
                   <tbody>
                     {diff.libraries.map((lib) => {
                       const stale = !!latestMax && !!lib.latest_dt && lib.latest_dt < latestMax;
+                      const missing = Number(lib.missing_count || 0);
                       return (
                         <tr key={lib.library} className="border-t border-slate-50">
                           <td className="px-2 py-0.5 text-slate-600">{lib.label || lib.library}</td>
                           <td
-                            className={`px-2 py-0.5 text-right font-mono ${stale ? 'text-amber-600 font-bold' : 'text-slate-500'}`}
-                            title={stale ? '落后于本次扫描的最新日期，请先物化该因子库' : undefined}
+                            className={`px-2 py-0.5 text-right font-mono ${stale || missing ? 'text-amber-600 font-bold' : 'text-slate-500'}`}
+                            title={missing ? `最新分区有 ${missing} 个因子列整列为空，推理会拒绝` : stale ? '落后于本次扫描的最新日期，请先物化该因子库' : undefined}
                           >
                             {fmtLatestDt(lib.latest_dt)}
                           </td>
                           <td className="px-2 py-0.5 text-right font-mono text-slate-500">{lib.factor_count}</td>
                           <td className={`px-2 py-0.5 text-right font-mono ${lib.new_count ? 'text-emerald-600 font-bold' : 'text-slate-400'}`}>
                             {lib.new_count}
+                          </td>
+                          <td className={`px-2 py-0.5 text-right font-mono ${missing ? 'text-rose-600 font-bold' : 'text-slate-300'}`}>
+                            {missing || '—'}
                           </td>
                         </tr>
                       );
