@@ -142,9 +142,17 @@ log_line "开始物化（日K最新=${KL_DT} 可用内存=${AVAIL_GB}GB alpha等
 TDX_SCRIPT="$QM_ROOT/backend/scripts/factor_materialize/tdx_ind.py"
 if [ "$DRY_RUN" -eq 0 ] && [ -f "$TDX_SCRIPT" ]; then
     tdx_rc=0
-    # quantdb_root() 只认 QM_QUANTDB_DATA_DIR（缺省 /data/quantdb，仅容器内存在）；
-    # 宿主机跑 keeper 时必须显式传，否则每天 rc=1「no trading days」。
-    QM_QUANTDB_DATA_DIR="$QUANTDB_ROOT" nice -n 10 "$PY" "$TDX_SCRIPT" >> "$LOG" 2>&1 || tdx_rc=$?
+    # 优先在 quantmind 容器内跑（root）：存量分区由容器写入，宿主机 zbox 对
+    # `dt=YYYYMMDD` 目录没有写权限，2026-11-20 起 nightly 每天 rc=1
+    # PermissionError，库停在 11-19，通达信模型推理门禁因此集体失败。
+    # 容器不可用才回退宿主机（此时仍需显式传 QM_QUANTDB_DATA_DIR，否则
+    # quantdb_root() 取不到 /data/quantdb 会 rc=1「no trading days」）。
+    if "$DOCKER_BIN" exec quantmind true >/dev/null 2>&1; then
+        "$DOCKER_BIN" exec -e QM_QUANTDB_DATA_DIR=/data/quantdb quantmind \
+            python backend/scripts/factor_materialize/tdx_ind.py >> "$LOG" 2>&1 || tdx_rc=$?
+    else
+        QM_QUANTDB_DATA_DIR="$QUANTDB_ROOT" nice -n 10 "$PY" "$TDX_SCRIPT" >> "$LOG" 2>&1 || tdx_rc=$?
+    fi
     if [ "$tdx_rc" -ne 0 ]; then
         log_line "警告：tdx_ind 增量失败 rc=$tdx_rc（不影响主链）"
         notify "🟠 tdx_ind 增量失败" "rc=$tdx_rc；次日训练会缺 tdx_ind 列。日志：logs/keepers/factor_materialize_daily.log"
