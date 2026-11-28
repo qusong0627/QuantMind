@@ -209,16 +209,21 @@ def build_cohort_daily_returns(
     end: str,
     min_adv: float = 2.0e7,
     adv_window: int = 20,
+    entry_price: str = "open",
 ) -> tuple[pd.Series, dict]:
     """把逐日 TopN 组合成「重叠 cohort」日收益序列。
 
-    - 信号日 T 的股票在 T+1 开盘买入（前复权 open），持有 H 个交易日后开盘卖出；
-    - T+1 开盘涨停（相对 T 收盘）视为买不进 → 剔除；退出日开盘跌停 → 顺延一日；
+    - ``entry_price="open"``（默认）：信号日 T 的股票 T+1 开盘买入（前复权 open），
+      持有 H 个交易日后开盘卖出；T+1 开盘涨停（相对 T 收盘）视为买不进 → 剔除，
+      退出日开盘跌停 → 顺延一日；日收益 = open→open。
+    - ``entry_price="close"``：T+1 收盘买入、T+1+H 收盘卖出；涨停/跌停按收盘价判定，
+      日收益 = close→close。与训练标签的 ``execution_price`` 对齐。
     - ``min_adv``：信号日 20 日日均成交额下限（元），低于则不可配置 → 剔除；
     - 成本 = 双边 ``2×cost_bps``，均摊到持有的 H 天；
     - 每日组合收益 = 当日所有活跃 cohort 日收益的等权均值；
     - 容量：按参与率 5%/10% 与等权持仓，估计每个 cohort 的最大资金规模。
     """
+    price_col = "open" if str(entry_price or "").lower() == "open" else "close"
     symbols = sorted({s for syms in picks.values() for s in syms})
     if not symbols:
         raise RuntimeError("窗口内没有可用选股")
@@ -235,7 +240,9 @@ def build_cohort_daily_returns(
     raw = resolve_quantdb_subdir("1_kline_data", "daily_unadjusted")
     fwd_df = _read_partitions(fwd, tdays, sym_set, ("open", "close", "amount"))
     raw_df = _read_partitions(raw, tdays, sym_set, ("open", "close"))
-    fwd_open = fwd_df.pivot(index="dt", columns="symbol", values="open").reindex(tdays)
+    fwd_price = fwd_df.pivot(index="dt", columns="symbol", values=price_col).reindex(
+        tdays
+    )
     # daily_forward 的 amount 单位是「万元」（实测 000001.SZ 2025-03-05 = 125489.2
     # 万元 ≈ 12.5 亿元）；门槛与容量均按元计，这里先统一乘 1e4。
     fwd_amount_yuan = (
@@ -244,7 +251,9 @@ def build_cohort_daily_returns(
     adv = fwd_amount_yuan.rolling(
         adv_window, min_periods=max(5, adv_window // 2)
     ).median()
-    raw_open = raw_df.pivot(index="dt", columns="symbol", values="open").reindex(tdays)
+    raw_price = raw_df.pivot(index="dt", columns="symbol", values=price_col).reindex(
+        tdays
+    )
     raw_close = raw_df.pivot(index="dt", columns="symbol", values="close").reindex(
         tdays
     )
@@ -274,15 +283,17 @@ def build_cohort_daily_returns(
         stats["signals"] += 1
         names: list[str] = []
         for sym in syms:
-            e_open = fwd_open.at[entry, sym] if sym in fwd_open.columns else np.nan
-            if not np.isfinite(e_open):
+            e_price = (
+                fwd_price.at[entry, sym] if sym in fwd_price.columns else np.nan
+            )
+            if not np.isfinite(e_price):
                 stats["dropped_missing"] += 1
                 continue
-            # 开盘涨停买不进
+            # 次日涨停买不进（open 口径看开盘价，close 口径看收盘价）
             prev_close = (
                 raw_close.at[signal, sym] if sym in raw_close.columns else np.nan
             )
-            o_raw = raw_open.at[entry, sym] if sym in raw_open.columns else np.nan
+            o_raw = raw_price.at[entry, sym] if sym in raw_price.columns else np.nan
             if np.isfinite(prev_close) and np.isfinite(o_raw) and prev_close > 0:
                 if o_raw / prev_close - 1.0 >= limit_pct_for_symbol(sym) - 0.005:
                     stats["dropped_limit_up"] += 1
@@ -298,14 +309,16 @@ def build_cohort_daily_returns(
             limit_down = limit_pct_for_symbol(sym) - 0.005
             while exit_i < len(tdays):
                 exit_day = tdays[exit_i]
-                if sym not in fwd_open.columns or not np.isfinite(
-                    fwd_open.at[exit_day, sym]
+                if sym not in fwd_price.columns or not np.isfinite(
+                    fwd_price.at[exit_day, sym]
                 ):
                     stats["dropped_missing"] += 1
                     exit_i = -1
                     break
                 o_exit = (
-                    raw_open.at[exit_day, sym] if sym in raw_open.columns else np.nan
+                    raw_price.at[exit_day, sym]
+                    if sym in raw_price.columns
+                    else np.nan
                 )
                 pc = (
                     raw_close.at[tdays[exit_i - 1], sym]
@@ -324,12 +337,12 @@ def build_cohort_daily_returns(
                 break
             if exit_i < 0 or exit_i >= len(tdays):
                 continue
-            # cohort 日收益（open→open）
+            # cohort 日收益（open→open 或 close→close）
             rets = []
             ok = True
             for j in range(entry_i + 1, exit_i + 1):
-                p0 = fwd_open.at[tdays[j - 1], sym]
-                p1 = fwd_open.at[tdays[j], sym]
+                p0 = fwd_price.at[tdays[j - 1], sym]
+                p1 = fwd_price.at[tdays[j], sym]
                 if not (np.isfinite(p0) and np.isfinite(p1) and p0 > 0):
                     ok = False
                     break

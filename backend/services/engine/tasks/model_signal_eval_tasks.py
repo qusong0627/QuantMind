@@ -132,12 +132,14 @@ def _run(max_models: int, window_days: int) -> dict:
         if market != "CN":
             skipped += 1
             continue
+        execution_price = svc.resolve_execution_price(meta, storage_path)
         try:
             report = svc.refresh_sync(
                 model_id,
                 storage_path,
                 market=market,
                 horizon=horizon,
+                execution_price=execution_price,
                 window_days=window_days,
             )
         except Exception as exc:  # noqa: BLE001 — 单个模型失败不影响其余

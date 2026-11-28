@@ -598,15 +598,16 @@ export const SignalEvalPanel: React.FC<SignalEvalPanelProps> = ({ modelId }) => 
                           ]
                             .filter(Boolean)
                             .join(' · ')
-                        : 'T+1 开盘买、持有期末开盘卖、涨跌停/ST/流动性过滤'
+                        : 'T+1 开盘/收盘买、持有期末同价卖、涨跌停/ST/流动性过滤'
                     }
                   >
                     严格实盘
                   </span>
                 </span>
                 <span className="text-[9px] text-slate-400">
-                  T+1 开盘 · 持 {report.window.horizon} 日 ·{' '}
-                  {report.execution?.cost_bps_per_side ?? 15}bp/边 · 基准 open→open
+                  {report.execution?.entry ?? 'T+1 开盘'} · 持 {report.window.horizon} 日 ·{' '}
+                  {report.execution?.cost_bps_per_side ?? 15}bp/边 · 基准{' '}
+                  {report.execution?.benchmark_basis ?? 'open→open'}
                 </span>
               </div>
               <SignalEvalTopNTable rows={report.topn} execution={report.execution} />

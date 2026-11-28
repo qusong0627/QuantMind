@@ -133,6 +133,8 @@ export interface SignalEvalReport {
   };
   topn: SignalEvalTopN[];
   execution?: {
+    /** 训练时的成交价口径：open = T+1 开盘买，close = T+1 收盘买 */
+    price?: 'open' | 'close';
     entry: string;
     exit: string;
     cost_bps_per_side: number;

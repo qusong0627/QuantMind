@@ -111,6 +111,11 @@ export const SignalEvalTopNTable: React.FC<SignalEvalTopNTableProps> = ({ rows, 
     }
   };
 
+  // 口径跟随模型训练时的 execution_price：open = T+1 开盘，close = T+1 收盘。
+  const basis = execution?.benchmark_basis ?? 'open→open';
+  const entryWord = (execution?.entry ?? 'T+1 开盘').includes('收盘') ? '收盘' : '开盘';
+  const exitWord = (execution?.exit ?? '').includes('收盘') ? '收盘' : '开盘';
+
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
       <div
@@ -142,11 +147,11 @@ export const SignalEvalTopNTable: React.FC<SignalEvalTopNTableProps> = ({ rows, 
               </th>
               <GroupHead label="收益" colSpan={2} tone="ret" />
               <GroupHead
-                label="指数超额 · open→open"
+                label={`指数超额 · ${basis}`}
                 colSpan={4}
                 tone="idx"
                 divided
-                title="同期 TopN 收益 − 指数同期 open→open 收益；红正绿负"
+                title={`同期 TopN 收益 − 指数同期 ${basis} 收益；红正绿负`}
               />
               <GroupHead label="风险" colSpan={2} tone="risk" divided />
               <GroupHead label="容量" colSpan={2} tone="cap" divided />
@@ -158,7 +163,7 @@ export const SignalEvalTopNTable: React.FC<SignalEvalTopNTableProps> = ({ rows, 
               <SubHead title="相对上证指数（000001.SH）">上证</SubHead>
               <SubHead title="相对深证成指（399001.SZ）">深证</SubHead>
               <SubHead title="相对中证1000（000852.SH）">中证1000</SubHead>
-              <SubHead title="T+1 开盘买入、持有期内的最大回撤" divided>最大回撤</SubHead>
+              <SubHead title={`T+1 ${entryWord}买入、持有期内的最大回撤`} divided>最大回撤</SubHead>
               <SubHead title="日收益年化夏普（252 日）">夏普</SubHead>
               <SubHead title="通过 ADV/涨停/ST 过滤后的平均持仓只数" divided>平均持仓</SubHead>
               <SubHead title="5% 参与率、按最不流动持仓估算的容量">容量(5%)</SubHead>
@@ -215,7 +220,7 @@ export const SignalEvalTopNTable: React.FC<SignalEvalTopNTableProps> = ({ rows, 
 
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-slate-100 bg-slate-50/50 px-3 py-2 text-[9px] text-slate-400">
         <span>
-          指数超额 = 同期 TopN 收益 − 指数 open→open 收益；<span className="text-rose-400">红正</span>
+          指数超额 = 同期 TopN 收益 − 指数 {basis} 收益；<span className="text-rose-400">红正</span>
           <span className="text-emerald-500">绿负</span>。
         </span>
         <span className="flex flex-wrap items-center gap-1.5">
@@ -234,7 +239,7 @@ export const SignalEvalTopNTable: React.FC<SignalEvalTopNTableProps> = ({ rows, 
               ) : null}
             </>
           ) : (
-            <span>T+1 开盘买 · 期末开盘卖 · 双边成本</span>
+            <span>T+1 {entryWord}买 · 期末{exitWord}卖 · 双边成本</span>
           )}
         </span>
       </div>

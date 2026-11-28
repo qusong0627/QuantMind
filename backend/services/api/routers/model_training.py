@@ -2707,8 +2707,8 @@ async def refresh_model_scorecards(
         raise HTTPException(status_code=503, detail=f"重算任务派发失败：{exc}") from exc
 
 
-def _signal_eval_params(model: dict[str, Any]) -> tuple[str, int]:
-    """模型记录 → (market, horizon)；老模型缺字段时按 A股/T+5 兜底。"""
+def _signal_eval_params(model: dict[str, Any]) -> tuple[str, int, str]:
+    """模型记录 → (market, horizon, execution_price)；老模型缺字段时兜底。"""
     meta = model.get("metadata_json")
     if not isinstance(meta, dict):
         meta = {}
@@ -2718,7 +2718,12 @@ def _signal_eval_params(model: dict[str, Any]) -> tuple[str, int]:
         horizon = int(meta.get("target_horizon_days") or 5)
     except (TypeError, ValueError):
         horizon = 5
-    return market, horizon
+    from backend.services.api import model_signal_eval_service
+
+    execution_price = model_signal_eval_service.resolve_execution_price(
+        meta, str(model.get("storage_path") or "")
+    )
+    return market, horizon, execution_price
 
 
 async def _require_signal_admission(
@@ -2727,7 +2732,7 @@ async def _require_signal_admission(
     """标准化评估闸门：red/unknown 必须显式 force；yellow 放行但把 reasons 带回前端。"""
     from backend.services.api import model_signal_eval_service
 
-    market, horizon = _signal_eval_params(model)
+    market, horizon, execution_price = _signal_eval_params(model)
     if market != "CN":
         return None
     admission = await asyncio.to_thread(
@@ -2736,6 +2741,7 @@ async def _require_signal_admission(
         str(model.get("storage_path") or ""),
         market=market,
         horizon=horizon,
+        execution_price=execution_price,
     )
     if admission.get("grade") in ("red", "unknown") and not force:
         raise HTTPException(
@@ -2768,7 +2774,7 @@ async def get_model_signal_eval(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    market, horizon = _signal_eval_params(model)
+    market, horizon, execution_price = _signal_eval_params(model)
     days = max(20, min(int(window_days), 120))
     return await asyncio.to_thread(
         model_signal_eval_service.get_state,
@@ -2776,6 +2782,7 @@ async def get_model_signal_eval(
         str(model.get("storage_path") or ""),
         market=market,
         horizon=horizon,
+        execution_price=execution_price,
         window_days=days,
     )
 
@@ -2795,7 +2802,7 @@ async def refresh_model_signal_eval(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    market, horizon = _signal_eval_params(model)
+    market, horizon, execution_price = _signal_eval_params(model)
     days = max(20, min(int(window_days), 120))
     return await asyncio.to_thread(
         model_signal_eval_service.start_refresh,
@@ -2803,6 +2810,7 @@ async def refresh_model_signal_eval(
         str(model.get("storage_path") or ""),
         market=market,
         horizon=horizon,
+        execution_price=execution_price,
         window_days=days,
     )
 

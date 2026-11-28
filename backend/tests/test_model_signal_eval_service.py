@@ -288,3 +288,47 @@ def test_deterioration_reasons_red_and_streak():
     history = [{"long_pass": False, "top20_excess": -0.01} for _ in range(5)]
     reasons = _deterioration_reasons(yellow_report, history)
     assert reasons and "连续" in reasons[0]
+
+
+def test_resolve_execution_price_follows_training_contract(tmp_path: Path):
+    """评估口径必须跟随训练 execution_price：meta > 公式 > config.yaml > 目标契约默认。"""
+    assert (
+        svc.resolve_execution_price({"label": {"execution_price": "open"}}, None)
+        == "open"
+    )
+    assert svc.resolve_execution_price({"execution_price": "close"}, None) == "close"
+    assert (
+        svc.resolve_execution_price(
+            {"label_formula": "label = close(T+11) / open(T+1) - 1"}, None
+        )
+        == "open"
+    )
+    assert (
+        svc.resolve_execution_price(
+            {"label_formula": "label = close(T+6) / close(T+1) - 1"}, None
+        )
+        == "close"
+    )
+    # metadata 缺字段时回退模型目录 config.yaml
+    (tmp_path / "config.yaml").write_text(
+        "label:\n  execution_price: open\n", encoding="utf-8"
+    )
+    assert svc.resolve_execution_price({}, str(tmp_path)) == "open"
+    # 目标契约默认 open；旧 legacy 默认 close
+    assert svc.resolve_execution_price({"target_id": "cn_t5_rank"}, None) == "open"
+    assert svc.resolve_execution_price({"target_id": "legacy"}, None) == "close"
+
+
+def test_fingerprint_includes_execution_price(tmp_path: Path):
+    pred = tmp_path / "pred.parquet"
+    pred.write_bytes(b"x")
+    with patch.object(svc, "_latest_data_day", return_value="20261127"):
+        fp_open = svc.pred_fingerprint(
+            pred, horizon=5, window_days=63, execution_price="open"
+        )
+        fp_close = svc.pred_fingerprint(
+            pred, horizon=5, window_days=63, execution_price="close"
+        )
+    assert fp_open["execution_price"] == "open"
+    assert fp_close["execution_price"] == "close"
+    assert fp_open != fp_close

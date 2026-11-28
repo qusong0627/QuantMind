@@ -52,15 +52,16 @@ from backend.shared.stock_utils import StockCodeUtil
 
 log = logging.getLogger(__name__)
 
-EVAL_VERSION = 3  # 改口径必须 +1：指纹含它，旧缓存会因此失效并自动重算
+EVAL_VERSION = 4  # 改口径必须 +1：指纹含它，旧缓存会因此失效并自动重算
 WINDOW_TRADING_DAYS = 63  # 约 3 个自然月
 TOPN_LIST = (20, 50, 100)
 DEFAULT_HORIZON = 5
 DEFAULT_MIN_ADV = 2.0e7
 DEFAULT_COST_BPS = 15.0
 LOCK_STALE_SECONDS = 15 * 60
-# 指数统一读 1_kline_data/index_daily（open/close 全有），基准超额按 open→open 对齐
-# TopN 的 T+1 开盘买入口径；不用 daily_forward 里的指数（只有部分、且只有 close）。
+EXECUTION_PRICES = ("open", "close")
+# 指数统一读 1_kline_data/index_daily（open/close 全有），基准超额按组合成交价对齐：
+# open 模型 open→open，close 模型 close→close；不用 daily_forward 里的指数（只有部分、且只有 close）。
 INDEX_SYMBOLS = {
     "hs300": "399300.SZ",  # 沪深300
     "sse": "000001.SH",  # 上证指数
@@ -72,6 +73,56 @@ HISTORY_LIMIT = 120
 
 class EvalUnavailable(RuntimeError):
     """模型不满足评估条件（无 pred / 非 A 股 / 窗口不足）。"""
+
+
+def resolve_execution_price(
+    metadata_json: dict | None, storage_path: str | None
+) -> str:
+    """模型训练时的成交价口径（open / close）。
+
+    评估必须和训练标签同口径：open = T+1 开盘买，close = T+1 收盘买。
+    优先级：
+    1. metadata_json.label.execution_price / metadata_json.execution_price；
+    2. label_formula 里的 open(T+1) / close(T+1)（旧模型只有公式）；
+    3. 模型目录 config.yaml 的 label.execution_price；
+    4. 目标契约（target_id != legacy）默认 open；legacy 默认 close。
+    """
+    meta = metadata_json if isinstance(metadata_json, dict) else {}
+    for holder in (meta.get("label"), meta):
+        if isinstance(holder, dict):
+            value = str(holder.get("execution_price") or "").strip().lower()
+            if value in EXECUTION_PRICES:
+                return value
+    formula = str(meta.get("label_formula") or "").replace(" ", "").lower()
+    if "/open(t+1)" in formula:
+        return "open"
+    if "/close(t+1)" in formula:
+        return "close"
+    # 公式不一定是分母写法（如 open(T+1) → close(T+11)），按出现顺序兜底
+    if "open(t+1)" in formula:
+        return "open"
+    if "close(t+1)" in formula:
+        return "close"
+    raw_path = str(storage_path or "").strip()
+    if raw_path:
+        try:
+            import yaml
+
+            cfg_path = Path(raw_path) / "config.yaml"
+            if cfg_path.is_file():
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                label = cfg.get("label") if isinstance(cfg, dict) else None
+                value = (
+                    str((label or {}).get("execution_price") or "").strip().lower()
+                    if isinstance(label, dict)
+                    else ""
+                )
+                if value in EXECUTION_PRICES:
+                    return value
+        except Exception as exc:  # noqa: BLE001 — 配置读不到就按下面的默认口径
+            log.debug("读取模型 config.yaml 失败 %s: %s", raw_path, exc)
+    target_id = str(meta.get("target_id") or "legacy").strip().lower()
+    return "open" if target_id not in ("", "legacy") else "close"
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +167,13 @@ def _latest_data_day() -> str:
     return days[-1] if days else ""
 
 
-def pred_fingerprint(pred_path: Path, *, horizon: int, window_days: int) -> dict:
+def pred_fingerprint(
+    pred_path: Path,
+    *,
+    horizon: int,
+    window_days: int,
+    execution_price: str = "close",
+) -> dict:
     try:
         stat = pred_path.stat()
     except OSError:
@@ -128,6 +185,7 @@ def pred_fingerprint(pred_path: Path, *, horizon: int, window_days: int) -> dict
         "horizon": int(horizon),
         "window_days": int(window_days),
         "eval_version": EVAL_VERSION,
+        "execution_price": str(execution_price or "close").lower(),
     }
 
 
@@ -185,6 +243,7 @@ def load_rolling_frame(
     window: dict,
     *,
     horizon: int,
+    execution_price: str = "close",
     min_adv: float = DEFAULT_MIN_ADV,
     include_st: bool = False,
 ) -> pd.DataFrame:
@@ -215,9 +274,14 @@ def load_rolling_frame(
             df = df[mask].copy()
     if df.empty:
         raise EvalUnavailable("ADV/ST 过滤后样本为空")
+    entry_mode = (
+        "open_entry"
+        if str(execution_price or "").lower() == "open"
+        else "close_entry"
+    )
     rets = price_forward_returns(
         sorted(df["sym_suffix"].unique()), start_iso, end_iso, (horizon,)
-    )["close_entry"][horizon]
+    )[entry_mode][horizon]
     df = df.merge(
         rets.rename("label_return"),
         left_on=["date_key", "sym_suffix"],
@@ -235,12 +299,15 @@ def load_rolling_frame(
 # ---------------------------------------------------------------------------
 # 组合与基准
 # ---------------------------------------------------------------------------
-def equal_weight_market_returns(symbols: list[str], start: str, end: str) -> pd.Series:
-    """打分池等权日收益（daily_forward 开盘价，open→open）。"""
+def equal_weight_market_returns(
+    symbols: list[str], start: str, end: str, *, price: str = "open"
+) -> pd.Series:
+    """打分池等权日收益（daily_forward 的开盘或收盘价，同口径）。"""
     import duckdb
 
     if not symbols:
         return pd.Series(dtype=float)
+    price_col = "open" if str(price or "").lower() == "open" else "close"
     fwd = resolve_quantdb_subdir("1_kline_data", "daily_forward")
     glob_pat = str(fwd / "dt=*" / "*.parquet").replace("\\", "/")
     lo = (pd.Timestamp(start) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
@@ -249,7 +316,7 @@ def equal_weight_market_returns(symbols: list[str], start: str, end: str) -> pd.
     try:
         px = con.execute(
             f"""
-            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, open
+            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, {price_col}
             FROM read_parquet('{glob_pat}', hive_partitioning=1)
             WHERE time >= DATE '{lo}' AND time <= DATE '{hi}'
             """
@@ -259,22 +326,25 @@ def equal_weight_market_returns(symbols: list[str], start: str, end: str) -> pd.
     px = px[px["symbol"].isin(set(symbols))]
     if px.empty:
         return pd.Series(dtype=float)
-    wide = px.pivot(index="date_key", columns="symbol", values="open").sort_index()
+    wide = px.pivot(index="date_key", columns="symbol", values=price_col).sort_index()
     rets = wide.pct_change(fill_method=None)
     series = rets.loc[rets.index >= start].mean(axis=1)
     series.index = pd.to_datetime(series.index, format="%Y%m%d")
     return series.dropna()
 
 
-def index_daily_returns(start: str, end: str) -> dict[str, pd.Series]:
-    """四大指数日收益（``index_daily`` 开盘价 open→open）。
+def index_daily_returns(
+    start: str, end: str, *, price: str = "open"
+) -> dict[str, pd.Series]:
+    """四大指数日收益（``index_daily`` 的开盘或收盘价，同口径）。
 
-    与 TopN 的 T+1 开盘买入、逐日 open→open 口径严格对齐；不用 close→close，
+    与 TopN 的 T+1 买入口径严格对齐：open 模型 open→open，close 模型 close→close，
     避免「组合开盘价、指数收盘价」的时点错配。中证500/中证1000 的代码在
     ``index_daily`` 里是 ``.SH``（不是 daily_forward 里的 ``.SZ``）。
     """
     import duckdb
 
+    price_col = "open" if str(price or "").lower() == "open" else "close"
     idx_dir = resolve_quantdb_subdir("1_kline_data", "index_daily")
     glob_pat = str(idx_dir / "dt=*" / "*.parquet").replace("\\", "/")
     lo = (pd.Timestamp(start) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
@@ -283,7 +353,7 @@ def index_daily_returns(start: str, end: str) -> dict[str, pd.Series]:
     try:
         px = con.execute(
             f"""
-            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, open
+            SELECT symbol, strftime(time, '%Y%m%d') AS date_key, {price_col}
             FROM read_parquet('{glob_pat}', hive_partitioning=1)
             WHERE time >= DATE '{lo}' AND time <= DATE '{hi}'
               AND symbol IN ({",".join(f"'{s}'" for s in INDEX_SYMBOLS.values())})
@@ -297,7 +367,7 @@ def index_daily_returns(start: str, end: str) -> dict[str, pd.Series]:
         if rows.empty:
             continue
         s = pd.Series(
-            rows["open"].to_numpy(dtype=float),
+            rows[price_col].to_numpy(dtype=float),
             index=pd.to_datetime(rows["date_key"], format="%Y%m%d"),
         )
         s = s.where(s > 0)
@@ -369,10 +439,15 @@ def topn_evaluation(
     horizon: int,
     cost_bps: float,
     min_adv: float,
+    execution_price: str = "open",
 ) -> list[dict]:
     symbols = sorted(frame["sym_suffix"].unique())
-    market = equal_weight_market_returns(symbols, window["start"], window["end"])
-    benchmarks = index_daily_returns(window["start"], window["end"])
+    market = equal_weight_market_returns(
+        symbols, window["start"], window["end"], price=execution_price
+    )
+    benchmarks = index_daily_returns(
+        window["start"], window["end"], price=execution_price
+    )
     rows: list[dict] = []
     for n in TOPN_LIST:
         picks = _picks_from_frame(frame, n)
@@ -383,6 +458,7 @@ def topn_evaluation(
             start=window["start"],
             end=window["end"],
             min_adv=min_adv,
+            entry_price=execution_price,
         )
         stats = _daily_stats(daily, market, benchmarks)
         rows.append(
@@ -637,6 +713,7 @@ def compute_report(
     *,
     market: str = "CN",
     horizon: int = DEFAULT_HORIZON,
+    execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
@@ -668,6 +745,7 @@ def compute_report(
         pred_path,
         window,
         horizon=horizon,
+        execution_price=execution_price,
         min_adv=min_adv,
         include_st=include_st,
     )
@@ -681,8 +759,13 @@ def compute_report(
     symbols = sorted(frame["sym_suffix"].unique())
     start_iso = pd.Timestamp(window["start"]).strftime("%Y-%m-%d")
     end_iso = pd.Timestamp(window["end"]).strftime("%Y-%m-%d")
+    entry_mode = (
+        "open_entry"
+        if str(execution_price or "").lower() == "open"
+        else "close_entry"
+    )
     decay_rets = price_forward_returns(symbols, start_iso, end_iso, DECAY_HORIZONS)[
-        "close_entry"
+        entry_mode
     ]
     decay = ic_decay(frame, decay_rets)
 
@@ -698,9 +781,10 @@ def compute_report(
         horizon=horizon,
         cost_bps=cost_bps,
         min_adv=min_adv,
+        execution_price=execution_price,
     )
     verdict = build_verdict(raw, neutral, quant, stab, topn)
-    benchmarks = index_daily_returns(start_iso, end_iso)
+    benchmarks = index_daily_returns(start_iso, end_iso, price=execution_price)
     bench_series = {
         name: [
             {"date": d.strftime("%Y-%m-%d"), "nav": round(float(v), 4)}
@@ -749,8 +833,15 @@ def compute_report(
         "topn": topn,
         "verdict": verdict,
         "execution": {
-            "entry": "T+1 开盘",
-            "exit": f"T+1+{int(horizon)} 开盘",
+            "price": "open" if str(execution_price).lower() == "open" else "close",
+            "entry": "T+1 开盘"
+            if str(execution_price).lower() == "open"
+            else "T+1 收盘",
+            "exit": (
+                f"T+1+{int(horizon)} 开盘"
+                if str(execution_price).lower() == "open"
+                else f"T+1+{int(horizon)} 收盘"
+            ),
             "cost_bps_per_side": float(cost_bps),
             "cost_note": "双边成本含佣金/印花税/滑点（按单边 bps 均摊）",
             "limit_up_entry_excluded": True,
@@ -758,7 +849,11 @@ def compute_report(
             "st_pit_excluded": not include_st,
             "adv_floor_yuan": float(min_adv),
             "missing_price_skipped": True,
-            "benchmark_basis": "open→open（与组合同一时点）",
+            "benchmark_basis": (
+                "open→open"
+                if str(execution_price).lower() == "open"
+                else "close→close"
+            ),
         },
     }
     report["admission"] = admission_from_report(report)
@@ -796,6 +891,7 @@ def get_state(
     *,
     market: str = "CN",
     horizon: int = DEFAULT_HORIZON,
+    execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
 ) -> dict:
     """GET 载荷：缓存是否可用、是否过期、后台是否在跑。"""
@@ -811,7 +907,12 @@ def get_state(
             "reason": "模型目录没有 pred.parquet（还没推理过）",
         }
     paths = _cache_paths(model_id, window_days)
-    fingerprint = pred_fingerprint(pred_path, horizon=horizon, window_days=window_days)
+    fingerprint = pred_fingerprint(
+        pred_path,
+        horizon=horizon,
+        window_days=window_days,
+        execution_price=execution_price,
+    )
     cached = _read_json(paths["report"])
     cached_report = cached.get("report") if cached else None
     history = read_history(model_id, window_days)
@@ -876,6 +977,7 @@ def admission_status(
     *,
     market: str = "CN",
     horizon: int = DEFAULT_HORIZON,
+    execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
 ) -> dict:
     """准入等级（只读缓存，不触发计算）；供模型激活/策略绑定前的闸门调用。"""
@@ -885,6 +987,7 @@ def admission_status(
             storage_path,
             market=market,
             horizon=horizon,
+            execution_price=execution_price,
             window_days=window_days,
         )
     except Exception as exc:  # noqa: BLE001 — 读取失败按 unknown 处理，由调用方决定是否放行
@@ -926,6 +1029,7 @@ def _compute_and_store(
     *,
     market: str,
     horizon: int,
+    execution_price: str,
     window_days: int,
     min_adv: float,
     cost_bps: float,
@@ -937,6 +1041,7 @@ def _compute_and_store(
         storage_path,
         market=market,
         horizon=horizon,
+        execution_price=execution_price,
         window_days=window_days,
         min_adv=min_adv,
         cost_bps=cost_bps,
@@ -946,7 +1051,10 @@ def _compute_and_store(
     pred_path = pred_parquet_path(storage_path)
     assert pred_path is not None
     report["fingerprint"] = pred_fingerprint(
-        pred_path, horizon=horizon, window_days=window_days
+        pred_path,
+        horizon=horizon,
+        window_days=window_days,
+        execution_price=execution_price,
     )
     paths = _cache_paths(model_id, window_days)
     _atomic_write_json(
@@ -966,6 +1074,7 @@ def _run_job(
     *,
     market: str,
     horizon: int,
+    execution_price: str,
     window_days: int,
     min_adv: float,
     cost_bps: float,
@@ -986,6 +1095,7 @@ def _run_job(
             storage_path,
             market=market,
             horizon=horizon,
+            execution_price=execution_price,
             window_days=window_days,
             min_adv=min_adv,
             cost_bps=cost_bps,
@@ -1008,6 +1118,7 @@ def refresh_sync(
     *,
     market: str = "CN",
     horizon: int = DEFAULT_HORIZON,
+    execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
@@ -1031,6 +1142,7 @@ def refresh_sync(
             storage_path,
             market=market,
             horizon=horizon,
+            execution_price=execution_price,
             window_days=window_days,
             min_adv=min_adv,
             cost_bps=cost_bps,
@@ -1054,6 +1166,7 @@ def start_refresh(
     *,
     market: str = "CN",
     horizon: int = DEFAULT_HORIZON,
+    execution_price: str = "close",
     window_days: int = WINDOW_TRADING_DAYS,
     min_adv: float = DEFAULT_MIN_ADV,
     cost_bps: float = DEFAULT_COST_BPS,
@@ -1086,6 +1199,7 @@ def start_refresh(
         kwargs={
             "market": market,
             "horizon": horizon,
+            "execution_price": execution_price,
             "window_days": window_days,
             "min_adv": min_adv,
             "cost_bps": cost_bps,
