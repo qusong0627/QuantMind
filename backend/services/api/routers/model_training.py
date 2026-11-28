@@ -2408,15 +2408,17 @@ async def get_inference_coverage(
             not coverage.gap_dates
             and coverage.reason is None
             and not coverage.estimated
-            and not coverage.factor_stale
+            and not coverage.factor_blocked
         ),
         "factor_source": coverage.factor_source,
         "factor_latest_date": coverage.factor_latest_date,
         "market_latest_date": coverage.market_latest_date,
         "factor_lag_days": coverage.factor_lag_days,
         "factor_stale": coverage.factor_stale,
+        "factor_incomplete": coverage.factor_incomplete,
+        "factor_missing_features": list(coverage.factor_missing_features)[:50],
     }
-    if coverage.factor_stale:
+    if coverage.factor_blocked:
         payload["factor_stale_message"] = factor_stale_message(coverage)
     if coverage.data_cutoff_date:
         payload["data_cutoff_date"] = coverage.data_cutoff_date
@@ -2446,10 +2448,10 @@ async def trigger_backfill(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     gaps = list(coverage.gap_dates)
     stale_message = factor_stale_message(coverage)
-    if not gaps:
-        if coverage.factor_stale:
-            # 不是「已是最新」，也不是模型坏了：因子源本身停在更早的日期。
-            # 200 返回，前端按 blocked 展示橙色提示，而不是红色失败。
+    if coverage.factor_incomplete or not gaps:
+        if coverage.factor_blocked:
+            # 不是「已是最新」，也不是模型坏了：因子源停在更早日期，或最新分区
+            # 有整列为空（没有原始因子数据）。200 返回，前端按 blocked 展示橙色提示。
             return {
                 "task_id": None,
                 "status": "blocked",
@@ -2459,6 +2461,8 @@ async def trigger_backfill(
                 "factor_latest_date": coverage.factor_latest_date,
                 "market_latest_date": coverage.market_latest_date,
                 "factor_lag_days": coverage.factor_lag_days,
+                "factor_incomplete": coverage.factor_incomplete,
+                "factor_missing_count": len(coverage.factor_missing_features),
             }
         return {
             "task_id": None,
